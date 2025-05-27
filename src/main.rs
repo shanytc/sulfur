@@ -99,7 +99,7 @@ pub enum PrintArg {
 #[derive(Debug)]
 pub enum IRNode {
     Function { name: String, body: Vec<IRNode> },
-    VarDecl { name: String, value: Literal },
+    VarDecl(Vec<(String, Option<Literal>)>),
     Assign { name: String, value: Literal },
     Print { args: Vec<PrintArg> },
 }
@@ -157,7 +157,7 @@ impl Parser {
                     let var_name = id.clone();
 
                     // check if variable is declared, else panic!
-                    if !stmts.iter().any(|n| matches!(n, IRNode::VarDecl { name, .. } if name == &var_name)) {
+                    if !stmts.iter().any(|n| matches!(n, IRNode::VarDecl(decls) if decls.iter().any(|(name, _)| name == &var_name))) {
                         panic!("Variable '{}' hasn't been declared!", var_name);
                     }
 
@@ -179,45 +179,59 @@ impl Parser {
 
     pub fn parse_let(&mut self) -> IRNode {
         self.advance(); // consume "let"
+        let mut declarations: Vec<(String, Option<Literal>)> = Vec::new();
 
-        // consume variable name
-        let name = if let Token::Identifier(n) = &self.cur_token {
-            let nn = n.clone();
-            self.advance(); // consume the identifier
-            nn
-        } else {
-            panic!("Expected identifier after let, found: {:?}", self.cur_token);
-        };
+        loop {
+            let name = match &self.cur_token {
+                Token::Identifier(n) => {
+                    let n = n.clone();
+                    self.advance(); // consume the identifier
+                    n
+                },
+                _ => panic!("Expected identifier after let, found: {:?}", self.cur_token),
+            };
 
-        // consume '='
-        if self.cur_token == Token::Assign { self.advance(); }
+            let mut value: Option<Literal> = None;
+            if self.cur_token == Token::Assign {
+                self.advance();  // consume the '='
 
-        // consume value
-        let value = match &self.cur_token {
-            Token::NumberLiteral(s) => {
-                if s.contains('.'){
-                    let f = s.parse().unwrap_or(0.0);
-                    self.advance(); // consume the number literal
-                    Literal::Float(f)
-                } else {
-                    let i = s.parse().unwrap_or(0);
-                    self.advance(); // consume the number literal
-                    Literal::Int(i)
+                value = Some(match &self.cur_token {
+                    Token::NumberLiteral(s) => {
+                        if s.contains('.') {
+                            let f = s.parse().unwrap_or(0.0);
+                            self.advance(); // consume the number literal
+                            Literal::Float(f)
+                        } else {
+                            let i = s.parse().unwrap_or(0);
+                            self.advance(); // consume the number literal
+                            Literal::Int(i)
+                        }
+                    },
+                    Token::StringLiteral(s) => {
+                        let ss = s.clone();
+                        self.advance(); // consume the string literal
+                        Literal::String(ss)
+                    }
+                    _ => {
+                        println!("Expected number or string literal after let, found: {:?}", self.cur_token);
+                        Literal::Int(0) // default value
+                    }
+                });
+            }
+
+            declarations.push((name, value));
+
+            match &self.cur_token {
+                Token::Comma => self.advance(), // consume the comma
+                Token::SemiColon => {
+                    self.advance(); // consume the semicolon
+                    break; // end of declarations
                 }
-            },
-            Token::StringLiteral(s) => {
-                let ss = s.clone();
-                self.advance(); // consume the string literal
-                Literal::String(ss)
+                _ => panic!("Expected comma or semicolon after variable declaration, found: {:?}", self.cur_token),
             }
-            _ => {
-                println!("Expected number or string literal after let, found: {:?}", self.cur_token);
-                Literal::Int(0)
-            }
-        };
+        }
 
-        if self.cur_token == Token::SemiColon { self.advance(); }
-        IRNode::VarDecl { name, value }
+        IRNode::VarDecl(declarations)
     }
 
     pub fn parse_literal(token: &Token) -> Literal {
@@ -349,8 +363,11 @@ impl IRTranslator {
                 for n in nodes {
                     if let IRNode::Function { name: _ , body } = n {
                         for stmt in body {
-                            if let IRNode::VarDecl { name, value } = stmt {
-                                var_decls.push((name.clone(), value));
+                            if let IRNode::VarDecl(decls) = stmt {
+                                for (name, value) in decls {
+                                    // If value is None, we assume it's 0
+                                    var_decls.push((name.clone(), value.as_ref().unwrap_or(&Literal::Int(0))));
+                                }
                             }
                         }
                     }
@@ -542,9 +559,10 @@ impl IRTranslator {
 fn main() {
     let src = r#"
         main() {
-            let x;
+            let x, y;
             x = 5;
-            print("val=%d", x);
+            y = 10
+            print("val=%d, %d", x,y);
         }"#;
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer);
