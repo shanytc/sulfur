@@ -1,4 +1,3 @@
-
 #[derive(Debug, PartialEq)]
 pub enum Token {
     Identifier(String),
@@ -92,10 +91,16 @@ pub enum Literal {
 }
 
 #[derive(Debug)]
+pub enum PrintArg {
+    Literal(Literal),
+    Variable(String),
+}
+
+#[derive(Debug)]
 pub enum IRNode {
     Function { name: String, body: Vec<IRNode> },
     VarDecl { name: String, value: Literal },
-    Print { message: String },
+    Print { args: Vec<PrintArg> },
 }
 
 pub struct Parser {
@@ -214,18 +219,44 @@ impl Parser {
     pub fn parse_print(&mut self) -> IRNode {
         self.advance(); // consume "print"
         if self.cur_token == Token::LParen { self.advance(); }
-        let message = if let Token::StringLiteral(s) = &self.cur_token {
-            let msg = s.clone();
-            self.advance(); // consume the string literal
-            msg
-        } else {
-            println!("Expected string literal after print, found: {:?}", self.cur_token);
-            String::new()
-        };
+
+        let mut args = Vec::new();
+
+        loop {
+            match &self.cur_token {
+                Token::StringLiteral(s) => {
+                    let ss = s.clone();
+                    args.push(PrintArg::Literal(Literal::String(ss)));
+                    self.advance(); // consume the string literal
+                }
+                Token::NumberLiteral(s) => {
+                    if s.contains('.') {
+                        let f = s.parse().unwrap_or(0.0);
+                        args.push(PrintArg::Literal(Literal::Float(f)));
+                    } else {
+                        let i = s.parse().unwrap_or(0);
+                        args.push(PrintArg::Literal(Literal::Int(i)));
+                    }
+                    self.advance(); // consume the number literal
+                }
+                Token::Identifier(name) => {
+                    let nn = name.clone();
+                    args.push(PrintArg::Variable(nn));
+                    self.advance(); // consume the identifier
+                }
+                _ => {
+                    println!("Expected arguments after print, found: {:?}", self.cur_token);
+                    break;
+                }
+            }
+            if self.cur_token == Token::Comma { self.advance(); continue; }
+            break;
+        }
 
         if self.cur_token == Token::RParen { self.advance(); }
         if self.cur_token == Token::SemiColon { self.advance(); }
-        IRNode::Print { message }
+
+        IRNode::Print {args}
     }
 }
 
@@ -237,63 +268,184 @@ pub enum Backend {
 pub struct IRTranslator;
 
 impl IRTranslator {
+    fn masm_encode_string(src: &str) -> String {
+        let mut encoded = String::new();
+        let mut chars = src.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\\' && matches!(chars.peek(), Some('n')) {
+                chars.next();                       // consume the 'n'
+                encoded.push_str("\", 13,10, \"");      // CR LF
+            } else if ch == '"' {
+                encoded.push_str("\"\"");           // escape quotes for MASM
+            } else {
+                encoded.push(ch);
+            }
+        }
+
+        format!("\"{}\"", encoded.trim_end_matches(", 13,10, "))
+    }
+
     pub fn translate(nodes: &[IRNode], backend: Backend) -> String {
        match backend {
            Backend::JavaScript => todo!(),
            Backend::MASM => {
                let mut out = String::new();
 
-               // MASM boilerplate
-               out.push_str(".686\n.model flat, c\n\n");
-               out.push_str("extrn printf:PROC\n");
-               out.push_str("includelib msvcrt.lib\n\n");
+               // Determine if any print exists
+                let has_print = nodes.iter().any(|n| if let IRNode::Function { body, .. } = n {
+                    body.iter().any(|stmt| matches!(stmt, IRNode::Print { .. }))
+                } else { false });
 
-               // data section
-               out.push_str(".data\n");
-               for node in nodes {
-                   if let IRNode::Function { name: _ , body } = node {
+               // MASM boilerplate
+               out.push_str(".386\n.model flat, c\n");
+               out.push_str("option casemap:none\n\n");
+               if has_print {
+                   out.push_str("extrn printf:PROC\n");
+                   out.push_str("includelib lib\\msvcrt.lib\n\n");
+                }
+
+               // collect variables
+               let mut var_decls = Vec::new();
+               for n in nodes {
+                   if let IRNode::Function { name: _ , body } = n {
                        for stmt in body {
-                           match stmt {
-                               IRNode::Print { message } => {
-                                   out.push_str(&format!("msg db \"{}\",0\n", message));
-                               },
-                               IRNode::VarDecl { name, value } => {
-                                   match value {
-                                       Literal::Int(i) => out.push_str(&format!("{} dq {},0\n", name, i)),
-                                       Literal::Float(f) => out.push_str(&format!("{} dq {},0\n", name, f)),
-                                       Literal::String(s) => out.push_str(&format!("{} db \"{}\",0\n", name, s)),
-                                   }
-                               }
-                              _ => {
-                                  panic!("Unsupported IR node: {:?}", stmt);
-                              }
+                           if let IRNode::VarDecl { name, value } = stmt {
+                               var_decls.push((name.clone(), value));
                            }
                        }
                    }
                }
 
-               // code section
-               out.push_str("\n.code\n");
-               for node in nodes {
-                   if let IRNode::Function { name , body: _ } = node {
-                      out.push_str(&format!("{} proc\n", name)) ;
-                       // assume ohly one print per function for now
-                       out.push_str("    push offset msg\n");
-                       out.push_str("    call printf\n");
-                       out.push_str("    ret\n");
-                       out.push_str(&format!("{} endp\n", name));
+               // data section
+               out.push_str(".data\n");
+               for (name, value) in &var_decls {
+                    match value {
+                        Literal::Int(i) => out.push_str(&format!("{} dd {}\n", name, i)),
+                        Literal::Float(f) => out.push_str(&format!("{} real4 {}\n", name, f)),
+                        Literal::String(s) => {
+                            // escape \n as 13, 10
+                            out.push_str(&format!("{} db \"{}\",0\n", name, s))
+                        },
+                    }
+                }
+
+               // Compile format strings for print statements
+               let mut fmt_map = Vec::new(); // (label, fmt)
+               let mut fmt_count = 0;
+
+               // Iterate through nodes to find print statements and build format strings
+               for n in nodes {
+                   if let IRNode::Function { body, .. } = n {
+                       for stmt in body {
+                           if let IRNode::Print { args } = stmt {
+                               // Determine raw_fmt: first string literal or default "{}"
+                               let raw_fmt = if let Some(PrintArg::Literal(Literal::String(s))) = args.iter().find(|a| matches!(a, PrintArg::Literal(Literal::String(_)))) {
+                                   s.clone()
+                               } else {
+                                   "{}".to_string()
+                               };
+                               // Build fmt_str by interleaving parts and correct specifiers
+                               let parts: Vec<&str> = raw_fmt.split("{}").collect();
+                               let mut fmt_str = String::new();
+                               // parameters correspond to args after the format literal
+                               let params: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
+                                   args.iter().skip(1).collect()
+                               } else {
+                                   args.iter().collect()
+                               };
+                               for i in 0..parts.len() {
+                                   fmt_str.push_str(parts[i]);
+                                   if i < params.len() {
+                                       let spec = match params[i] {
+                                           PrintArg::Literal(Literal::Float(_)) => "%f",
+                                           PrintArg::Literal(Literal::String(_)) => "%s",
+                                           PrintArg::Literal(Literal::Int(_)) => "%d",
+                                           PrintArg::Variable(name) => match var_decls.iter().find(|(n, _)| n == name) {
+                                               Some((_, Literal::Int(_))) => "%d",
+                                               Some((_, Literal::Float(_))) => "%f",
+                                               Some((_, Literal::String(_))) => "%s",
+                                               _ => panic!("Unknown variable type: {:?}", name),
+                                           },
+                                       };
+                                       fmt_str.push_str(spec);
+                                   }
+                               }
+                               let lbl = format!("fmt{}", fmt_count);
+                               fmt_count += 1;
+                               fmt_map.push((lbl.clone(), fmt_str));
+                           }
+                       }
                    }
                }
 
-               out.push_str("end main\n");
-               out
+               // Add format strings to data section
+               for (lbl, fmt) in &fmt_map {
+                   out.push_str(&format!("{} db {},0\n", lbl, Self::masm_encode_string(fmt)));
+               }
+
+               // code section
+               out.push_str("\n.code\n");
+               let mut fmt_index = 0;
+               for n in nodes {
+                    if let IRNode::Function { name, body } = n {
+                        out.push_str(&format!("{} proc\n", name));
+                        for stmt in body {
+                            // Handle Print statements
+                            if let IRNode::Print { args } = stmt {
+                                // push args in reverse order
+                                let params: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
+                                    args.iter().skip(1).collect()
+                                } else {
+                                    args.iter().collect()
+                                };
+                                for param in params.iter().rev() {
+                                    match param {
+                                        PrintArg::Literal(Literal::Int(i)) => out.push_str(&format!("    push {}\n", i)),
+                                        PrintArg::Literal(Literal::Float(f)) => out.push_str(&format!("    push {}\n", f)),
+                                        PrintArg::Literal(Literal::String(_)) => {
+                                            // string literal params are not pushed separately
+                                        },
+                                        PrintArg::Variable(name) => match var_decls.iter().find(|(n, _)| n == name) {
+                                            Some((_, Literal::Int(_))) => out.push_str(&format!("    push dword ptr [{}]\n", name)),
+                                            Some((_, Literal::Float(_))) => out.push_str(&format!("    push dword ptr [{}]\n", name)),
+                                            Some((_, Literal::String(_))) => {
+                                                out.push_str(&format!("    lea eax, {}\n", name));
+                                                out.push_str("    push eax\n");
+                                            },
+                                            _  => {}
+                                        },
+                                    }
+                                }
+                                // push format label
+                                let fmt_label = &fmt_map[fmt_index].0;
+                                fmt_index += 1;
+                                out.push_str(&format!("    push offset {}\n", fmt_label));
+                                out.push_str("    call printf\n");
+                                // clean the stack
+                                let num_args = fmt_map[fmt_index - 1].1.matches('%').count();
+                                out.push_str(&format!("    add esp, {}\n", (num_args+1) * 4));
+                            }
+
+                        }
+                        out.push_str("    xor eax, eax\n");
+                        out.push_str("    ret\n");
+                        out.push_str(&format!("{} endp\n\n", name));
+                    }
+                }
+                out.push_str("end main\n");
+                out
            },
        }
     }
 }
 
 fn main() {
-    let src = "main() { let x = 5; }";
+    let src = r#"
+        main() {
+            let x = "test";
+            print("hello\nworld");
+        }"#;
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer);
     let ir = parser.parse_program();
