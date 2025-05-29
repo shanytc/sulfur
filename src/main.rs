@@ -99,14 +99,19 @@ impl Lexer {
             '*' => { self.next_char(); Token::Star }
             '/' => { self.next_char(); Token::Slash }
             '"' => {
-                // parse string literal
-                self.next_char(); // consume the opening quote
+                self.next_char();                 // consume opening quote
                 let mut s = String::new();
-                while self.peek() != '"' && self.peek() != '\0' {
-                    s.push(self.next_char());
-                }
-                if self.peek() == '"' {
-                    self.next_char();
+
+                loop {
+                    match self.peek() {
+                        '\0' => panic!("unterminated string literal"),
+                        '"'  => { self.next_char(); break; }      // closing quote
+                        '\\' => {                                // escape sequence
+                            s.push(self.next_char());            // push the backslash
+                            s.push(self.next_char());            // push the escaped char
+                        }
+                        _   => s.push(self.next_char()),
+                    }
                 }
                 Token::StringLiteral(s)
             }
@@ -118,9 +123,9 @@ impl Lexer {
                 Token::NumberLiteral(num)
             }
             '\0' => Token::EOF,
-            c if c.is_alphabetic() => {
+            c if c.is_alphabetic() || c == '_' => {
                 let mut ident = String::new();
-                while self.peek().is_alphanumeric() {
+                while self.peek().is_alphanumeric() || self.peek() == '_' {
                     ident.push(self.next_char());
                 }
                 Token::Identifier(ident)
@@ -391,7 +396,15 @@ impl Parser {
                     args.push(PrintArg::Literal(Literal::String(s.clone())));
                     self.advance(); // consume the string literal
                     first = false;
-                }else {
+                }else if let Token::Identifier(id) = &self.cur_token {
+                    // if the first argument is an identifier, it must be a variable
+                    let var_name = id.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
+                    if self.constants.contains_key(&var_name) {
+                        args.push(PrintArg::Variable(var_name));
+                    } else {
+                        panic!("Variable '{}' is not declared!", var_name);
+                    }
+                } else {
                     panic!("Expected string literal as first argument to print, found: {:?}", self.cur_token);
                 }
             } else {
@@ -424,31 +437,61 @@ pub struct IRTranslator;
 
 impl IRTranslator {
     fn masm_encode_string(src: &str) -> String {
-        let mut encoded = String::new();
+        let mut parts: Vec<String> = Vec::new();
+        let mut seg   = String::new();
         let mut chars = src.chars().peekable();
 
+        // helper to flush current text segment (if not empty)
+        let flush = |seg: &mut String, parts: &mut Vec<String>| {
+            if !seg.is_empty() {
+                parts.push(format!("\"{}\"", seg.replace('"', "\"\"")));
+                seg.clear();
+            }
+        };
+
         while let Some(ch) = chars.next() {
-            if ch == '\\' && matches!(chars.peek(), Some('n')) {
-                chars.next();                       // consume the 'n'
-                encoded.push_str("\", 13,10, \"");      // CR LF
-            }
-            else if ch == '\\' && matches!(chars.peek(), Some('t')) {
-                chars.next();                       // consume the 't'
-                encoded.push_str("\", 9, \"");         // tab
-            }
-            else if ch == '\\' && matches!(chars.peek(), Some('r')) {
-                chars.next();                       // consume the 'r'
-                encoded.push_str("\", 13, \"");        // CR
-            }
-            else if ch == '\\' {
-                encoded.push('\\');                 // just a backslash
-            }
-            else {
-                encoded.push(ch);
+            if ch == '\\' {
+                match chars.peek() {
+                    Some('n') => { chars.next(); flush(&mut seg, &mut parts); parts.push("13,10".into()); }
+                    Some('r') => { chars.next(); flush(&mut seg, &mut parts); parts.push("13".into());    }
+                    Some('t') => { chars.next(); flush(&mut seg, &mut parts); parts.push("9".into());     }
+                    Some('\\') => { chars.next(); seg.push('\\'); }      // keep backslash
+                    Some('"')  => { chars.next(); seg.push('"');  }      // keep quote
+                    _ => seg.push('\\'),                                 // unknown escape: keep '\'
+                }
+            } else {
+                seg.push(ch);
             }
         }
+        flush(&mut seg, &mut parts);   // tail
 
-        format!("\"{}\"", encoded.trim_end_matches(", 13,10, ")).replace("\"\",", "")
+        parts.join(",")
+        // let mut parts: Vec<String> = Vec::new();
+        // let mut segment = String::new();
+        // let mut chars   = src.chars().peekable();
+        //
+        // while let Some(ch) = chars.next() {
+        //     if ch == '\\' && matches!(chars.peek(), Some('n')) {
+        //         chars.next(); // consume the 'n'
+        //
+        //         // flush any text collected so far
+        //         if !segment.is_empty() {
+        //             parts.push(format!("\"{}\"", segment.replace('"', "\"\"")));
+        //             segment.clear();
+        //         }
+        //         // push CR/LF bytes
+        //         parts.push("13,10".into());
+        //     } else {
+        //         // ordinary character – keep building current segment
+        //         segment.push(ch);
+        //     }
+        // }
+        // // flush tail if string didn’t end with \n
+        // if !segment.is_empty() {
+        //     parts.push(format!("\"{}\"", segment.replace('"', "\"\"")));
+        // }
+        //
+        // parts.join(",")
     }
 
     pub fn masm_gen_expr(
@@ -467,6 +510,8 @@ impl IRTranslator {
                 } else if let Some((_, Literal::Float(_))) = var_decls.iter().find(|(n, _)| *n == name) {
                     out.push_str(&format!("    fld qword ptr [{}]\n", name)); // load float variable
                     out.push_str("    fistp dword ptr [eax]\n"); // convert to int and store in eax
+                } else if let Some((_, Literal::String(_))) = var_decls.iter().find(|(n, _)| *n == name) {
+                    out.push_str(&format!("    lea eax, {}\n", name)); // load address of string variable
                 } else {
                     panic!("Variable '{}' not found in declarations", name);
                 }
@@ -731,8 +776,9 @@ fn main() {
         main() {
             let x = 1, y = 1;
             let c = x - y;
+            let hello_world = "Hello, world!";
             x = 5 - 1;
-            print("res=%d/%d/%d", c, 1 + 5, x);
+            print("msg: %s", hello_world);
         }"#;
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer);
