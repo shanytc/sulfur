@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Identifier(String),
@@ -158,12 +160,13 @@ pub enum IRNode {
 pub struct Parser {
     lexer: Lexer,
     cur_token: Token,
+    constants: HashMap<String, Literal>,
 }
 
 impl Parser {
     pub fn new(mut lexer: Lexer) -> Self {
         let cur_token = lexer.next_token();
-        Parser { lexer, cur_token }
+        Parser { lexer, cur_token, constants: HashMap::new() }
     }
 
     fn advance(&mut self) {
@@ -228,13 +231,13 @@ impl Parser {
         stmts
     }
 
-    fn const_eval(expr: &Expr) -> Literal {
+    fn const_eval(&self, expr: &Expr) -> Literal {
         match expr {
             Expr::Literal(lit) => lit.clone(),
 
             Expr::Binary { left, op: Token::Plus, right } => {
-                let l = Self::const_eval(left);
-                let r = Self::const_eval(right);
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
                 match (l, r) {
                     (Literal::Int(a),   Literal::Int(b))   => Literal::Int(a + b),
                     (Literal::Float(a), Literal::Float(b)) => Literal::Float(a + b),
@@ -244,10 +247,24 @@ impl Parser {
                 }
             }
 
-            Expr::Variable(_) => {
-                // let var_name = name.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
-                // check if variable is declared, else panic!
-                todo!()
+            Expr::Binary { left, op: Token::Minus, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a),   Literal::Int(b))   => Literal::Int(a - b),
+                    (Literal::Float(a), Literal::Float(b)) => Literal::Float(a - b),
+                    (Literal::Int(a),   Literal::Float(b)) => Literal::Float(a as f64 - b),
+                    (Literal::Float(a), Literal::Int(b))   => Literal::Float(a - b as f64),
+                    _ => panic!("Cannot subtract strings in a constant expression"),
+                }
+            }
+
+            Expr::Variable(name) => {
+                let var_name = name.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
+                self.constants
+                    .get(&var_name)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("Variable '{}' is not declared!", var_name))
             }
 
             _ => panic!("Only constant numeric expressions are allowed in a let declaration!"),
@@ -279,7 +296,8 @@ impl Parser {
                 } else {
                     // anything else: parse expression then fold
                     let expr = self.parse_expression();      // returns Expr
-                    value = Some(Self::const_eval(&expr));   // → Literal
+                    value = Some(self.const_eval(&expr));   // → Literal
+                    self.constants.insert(name.clone(), value.clone().unwrap());
                 }
 
             }
@@ -319,10 +337,11 @@ impl Parser {
         let mut expr = self.parse_factor();
 
         // TODO: Handle binary operations like +, -, *, /
-        while self.cur_token == Token::Plus {
-            let op = self.cur_token.clone(); // save the '+' operator
+        while matches!(self.cur_token, Token::Plus | Token::Minus) {
+            let op = self.cur_token.clone(); // save the '+', '-' operator
             self.advance(); // consume the operator '+'
             let rhs = self.parse_factor();
+
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
@@ -452,12 +471,20 @@ impl IRTranslator {
                     panic!("Variable '{}' not found in declarations", name);
                 }
             }
-            Expr::Binary { left, op: Token::Plus, right } => {
-                Self::masm_gen_expr(out, left, var_decls); // generate code for left expression
-                out.push_str("    push eax\n"); // push left result onto stack
+            Expr::Binary { left, op , right } => {
+                Self::masm_gen_expr(out, left, var_decls); // generate code for the left expression
+                out.push_str("    push eax\n"); // push a left result onto stack
                 Self::masm_gen_expr(out, right, var_decls); // generate code for right expression
                 out.push_str("    pop ebx\n"); // pop left result into ebx
-                out.push_str("    add eax, ebx\n"); // add left and right results
+
+                match op {
+                    Token::Plus => out.push_str("    add eax, ebx\n"), // add left and right results
+                    Token::Minus => {
+                        out.push_str("    sub ebx, eax\n");
+                        out.push_str("    mov eax, ebx\n"); // subtract left from right
+                    }, // subtract left from right
+                    _ => unreachable!("Unsupported operator generation: {:?}", op)
+                }
             }
             _ => panic!("Unsupported expression type for MASM generation: {:?}", expr)
         }
@@ -493,7 +520,7 @@ impl IRTranslator {
                         for stmt in body {
                             if let IRNode::VarDecl(decls) = stmt {
                                 for (name, value) in decls {
-                                    // If value is None, we assume it's 0
+                                    // If the value is None, we assume it's 0
                                     var_decls.push((name.clone(), value.as_ref().unwrap_or(&Literal::Int(0))));
                                 }
                             }
@@ -626,23 +653,22 @@ impl IRTranslator {
                 // code section
                 out.push_str("\n.code\n");
                 let mut fmt_index = 0;
-                let mut index = 0;
                 for n in nodes {
                     if let IRNode::Function { name, body } = n {
                         out.push_str(&format!("{} proc\n", name));
-                        for stmt in body {
-                            // let's add labels
-                            out.push_str(&format!(".label_{}:\n", index));
-                            index += 1;
+                        for (stmt_idx, stmt) in body.iter().enumerate() {
 
 
                             if let IRNode::Assign { name, value } = stmt {
+                                out.push_str(&format!("label_{}:\n", stmt_idx));
+                                // let's add labels
                                 Self::masm_gen_expr(&mut out, value, &var_decls);
                                 out.push_str(&format!("    mov dword ptr [{}], eax\n", name));
                             }
 
                             // Handle Print statements
                             if let IRNode::Print { args } = stmt {
+                                out.push_str(&format!("label_{}:\n", stmt_idx));
                                 let mut clean_float_stack = 0;
                                 // push args in reverse order
                                 let params: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
@@ -704,8 +730,9 @@ fn main() {
     let src = r#"
         main() {
             let x = 1, y = 1;
-            let c = x + y;
-            print("res=%d", c);
+            let c = x - y;
+            x = 5 - 1;
+            print("res=%d/%d/%d", c, 1 + 5, x);
         }"#;
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer);
