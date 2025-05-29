@@ -1,8 +1,12 @@
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Identifier(String),
     StringLiteral(String),
     NumberLiteral(String),
+    Plus,          // +
+    Minus,         // -
+    Star,          // *
+    Slash,         // /
     LParen, RParen, LBrace, RBrace,
     Comma,
     Assign,     // '='
@@ -11,10 +15,23 @@ pub enum Token {
 }
 
 #[derive(Debug)]
+pub enum Expr {
+    Literal(Literal),          //  5   or  3.14  or  "abc"
+    Variable(String),          //  x
+    Binary {                   //  x + 4  or  7 + y  or  a + b
+        left: Box<Expr>,
+        op: Token,            // only Token::Plus for now
+        right: Box<Expr>,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct Lexer {
     input: Vec<char>,
     pos: usize,
 }
+
+const VAR_NAME_EXTENSION: &str = "_var";
 
 impl Lexer {
     pub fn new(input: &str) -> Self {
@@ -26,6 +43,9 @@ impl Lexer {
     fn peek(&self) -> char {
         self.input.get(self.pos).cloned().unwrap_or('\0')
     }
+    fn peek_next(&self) -> char {
+        self.input.get(self.pos + 1).cloned().unwrap_or('\0')
+    }
 
     fn next_char(&mut self) -> char {
         let ch = self.peek();
@@ -33,11 +53,36 @@ impl Lexer {
         ch
     }
 
+    pub fn skip_whitespace_and_comments(&mut self){
+        loop {
+            while self.peek().is_whitespace() {
+                self.next_char();
+            }
+
+            if self.peek() == '/' && self.peek_next() == '/' {
+                self.next_char();
+                self.next_char();
+
+                // chew up everything until the end of the line
+                while self.peek() != '\n' && self.peek() != '\0' {
+                    self.next_char();
+                }
+
+                continue;
+            }
+
+            // we're done with whitespace and comments
+            break;
+        }
+    }
+
     pub fn next_token(&mut self) -> Token {
         // Skip whitespace
-        while self.peek().is_whitespace() {
-            self.next_char();
-        }
+        // while self.peek().is_whitespace() {
+        //     self.next_char();
+        // }
+
+        self.skip_whitespace_and_comments();
 
         match self.peek() {
             '(' => { self.next_char(); Token::LParen }
@@ -47,6 +92,10 @@ impl Lexer {
             '=' => { self.next_char(); Token::Assign }
             ';' => { self.next_char(); Token::SemiColon }
             ',' => { self.next_char(); Token::Comma }
+            '+' => { self.next_char(); Token::Plus }
+            '-' => { self.next_char(); Token::Minus }
+            '*' => { self.next_char(); Token::Star }
+            '/' => { self.next_char(); Token::Slash }
             '"' => {
                 // parse string literal
                 self.next_char(); // consume the opening quote
@@ -83,7 +132,7 @@ impl Lexer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Literal {
     Int(i64),
     Float(f64),
@@ -94,16 +143,18 @@ pub enum Literal {
 pub enum PrintArg {
     Literal(Literal),
     Variable(String),
+    Expr(Expr),
 }
 
 #[derive(Debug)]
 pub enum IRNode {
     Function { name: String, body: Vec<IRNode> },
     VarDecl(Vec<(String, Option<Literal>)>),
-    Assign { name: String, value: Literal },
+    Assign { name: String, value: Expr },
     Print { args: Vec<PrintArg> },
 }
 
+#[derive(Debug, Clone)]
 pub struct Parser {
     lexer: Lexer,
     cur_token: Token,
@@ -154,7 +205,7 @@ impl Parser {
                 Token::Identifier(id) if id == "let" => stmts.push(self.parse_let()),
                 // consume identifier = value
                 Token::Identifier(id) => {
-                    let var_name = id.clone();
+                    let var_name = id.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
 
                     // check if variable is declared, else panic!
                     if !stmts.iter().any(|n| matches!(n, IRNode::VarDecl(decls) if decls.iter().any(|(name, _)| name == &var_name))) {
@@ -177,6 +228,32 @@ impl Parser {
         stmts
     }
 
+    fn const_eval(expr: &Expr) -> Literal {
+        match expr {
+            Expr::Literal(lit) => lit.clone(),
+
+            Expr::Binary { left, op: Token::Plus, right } => {
+                let l = Self::const_eval(left);
+                let r = Self::const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a),   Literal::Int(b))   => Literal::Int(a + b),
+                    (Literal::Float(a), Literal::Float(b)) => Literal::Float(a + b),
+                    (Literal::Int(a),   Literal::Float(b)) => Literal::Float(a as f64 + b),
+                    (Literal::Float(a), Literal::Int(b))   => Literal::Float(a + b as f64),
+                    _ => panic!("Cannot add strings in a constant expression"),
+                }
+            }
+
+            Expr::Variable(_) => {
+                // let var_name = name.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
+                // check if variable is declared, else panic!
+                todo!()
+            }
+
+            _ => panic!("Only constant numeric expressions are allowed in a let declaration!"),
+        }
+    }
+
     pub fn parse_let(&mut self) -> IRNode {
         self.advance(); // consume "let"
         let mut declarations: Vec<(String, Option<Literal>)> = Vec::new();
@@ -186,7 +263,7 @@ impl Parser {
                 Token::Identifier(n) => {
                     let n = n.clone();
                     self.advance(); // consume the identifier
-                    n
+                    n + VAR_NAME_EXTENSION // append _var to the variable name
                 },
                 _ => panic!("Expected identifier after let, found: {:?}", self.cur_token),
             };
@@ -195,28 +272,16 @@ impl Parser {
             if self.cur_token == Token::Assign {
                 self.advance();  // consume the '='
 
-                value = Some(match &self.cur_token {
-                    Token::NumberLiteral(s) => {
-                        if s.contains('.') {
-                            let f = s.parse().unwrap_or(0.0);
-                            self.advance(); // consume the number literal
-                            Literal::Float(f)
-                        } else {
-                            let i = s.parse().unwrap_or(0);
-                            self.advance(); // consume the number literal
-                            Literal::Int(i)
-                        }
-                    },
-                    Token::StringLiteral(s) => {
-                        let ss = s.clone();
-                        self.advance(); // consume the string literal
-                        Literal::String(ss)
-                    }
-                    _ => {
-                        println!("Expected number or string literal after let, found: {:?}", self.cur_token);
-                        Literal::Int(0) // default value
-                    }
-                });
+                // strings: keep the old direct path
+                if let Token::StringLiteral(_) = &self.cur_token {
+                    value = Some(Self::parse_literal(&self.cur_token));
+                    self.advance();                 // eat the string token
+                } else {
+                    // anything else: parse expression then fold
+                    let expr = self.parse_expression();      // returns Expr
+                    value = Some(Self::const_eval(&expr));   // → Literal
+                }
+
             }
 
             declarations.push((name, value));
@@ -232,6 +297,40 @@ impl Parser {
         }
 
         IRNode::VarDecl(declarations)
+    }
+
+    pub fn parse_factor(&mut self) -> Expr {
+        match &self.cur_token {
+            Token::NumberLiteral(_) | Token::StringLiteral(_) => {
+                let lit = Self::parse_literal(&self.cur_token);
+                self.advance(); // consume the literal
+                Expr::Literal(lit)
+            }
+            Token::Identifier(name) => {
+                let var_name = name.clone();
+                self.advance(); // consume the identifier
+                Expr::Variable(var_name)
+            }
+            _ => panic!("Expected a factor, found: {:?}", self.cur_token),
+        }
+    }
+
+    pub fn parse_expression(&mut self) -> Expr {
+        let mut expr = self.parse_factor();
+
+        // TODO: Handle binary operations like +, -, *, /
+        while self.cur_token == Token::Plus {
+            let op = self.cur_token.clone(); // save the '+' operator
+            self.advance(); // consume the operator '+'
+            let rhs = self.parse_factor();
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(rhs),
+            }
+        }
+
+        expr
     }
 
     pub fn parse_literal(token: &Token) -> Literal {
@@ -254,7 +353,7 @@ impl Parser {
        // here we want to parse assignment to a variable
         assert_eq!(self.cur_token, Token::Assign, "Expected assignment operator '='");
         self.advance(); // consume '='
-        let value = Self::parse_literal(&self.cur_token);
+        let value = self.parse_expression();
         if self.cur_token == Token::SemiColon { self.advance(); }
         IRNode::Assign { name, value }
     }
@@ -264,35 +363,29 @@ impl Parser {
         if self.cur_token == Token::LParen { self.advance(); }
 
         let mut args = Vec::new();
+        let mut first = true;
 
         loop {
-            match &self.cur_token {
-                Token::StringLiteral(s) => {
-                    let ss = s.clone();
-                    args.push(PrintArg::Literal(Literal::String(ss)));
+            // must be string literal
+            if first {
+                if let Token::StringLiteral(s) = &self.cur_token {
+                    args.push(PrintArg::Literal(Literal::String(s.clone())));
                     self.advance(); // consume the string literal
+                    first = false;
+                }else {
+                    panic!("Expected string literal as first argument to print, found: {:?}", self.cur_token);
                 }
-                Token::NumberLiteral(s) => {
-                    if s.contains('.') {
-                        let f = s.parse().unwrap_or(0.0);
-                        args.push(PrintArg::Literal(Literal::Float(f)));
-                    } else {
-                        let i = s.parse().unwrap_or(0);
-                        args.push(PrintArg::Literal(Literal::Int(i)));
-                    }
-                    self.advance(); // consume the number literal
-                }
-                Token::Identifier(name) => {
-                    let nn = name.clone();
-                    args.push(PrintArg::Variable(nn));
-                    self.advance(); // consume the identifier
-                }
-                _ => {
-                    println!("Expected arguments after print, found: {:?}", self.cur_token);
-                    break;
-                }
+            } else {
+                // any other ordinary expression
+                let expr = self.parse_expression();
+                args.push(PrintArg::Expr(expr));
             }
-            if self.cur_token == Token::Comma { self.advance(); continue; }
+
+            // check for more args
+            if self.cur_token == Token::Comma {
+                self.advance(); // consume the comma
+                continue;
+            }
             break;
         }
 
@@ -339,24 +432,59 @@ impl IRTranslator {
         format!("\"{}\"", encoded.trim_end_matches(", 13,10, ")).replace("\"\",", "")
     }
 
+    pub fn masm_gen_expr(
+        out: &mut String,
+        expr: &Expr,
+        var_decls: &Vec<(String, &Literal)>,
+    ){
+        match expr {
+            Expr::Literal(Literal::Int(i)) => {
+                out.push_str(&format!("    mov eax, {}\n",i));
+            }
+            Expr::Variable(name) => {
+                let name = name.to_owned() + VAR_NAME_EXTENSION; // append _var to the variable name
+                if let Some((_, Literal::Int(_))) = var_decls.iter().find(|(n, _)| *n == name) {
+                    out.push_str(&format!("    mov eax, dword ptr [{}]\n", name));
+                } else if let Some((_, Literal::Float(_))) = var_decls.iter().find(|(n, _)| *n == name) {
+                    out.push_str(&format!("    fld qword ptr [{}]\n", name)); // load float variable
+                    out.push_str("    fistp dword ptr [eax]\n"); // convert to int and store in eax
+                } else {
+                    panic!("Variable '{}' not found in declarations", name);
+                }
+            }
+            Expr::Binary { left, op: Token::Plus, right } => {
+                Self::masm_gen_expr(out, left, var_decls); // generate code for left expression
+                out.push_str("    push eax\n"); // push left result onto stack
+                Self::masm_gen_expr(out, right, var_decls); // generate code for right expression
+                out.push_str("    pop ebx\n"); // pop left result into ebx
+                out.push_str("    add eax, ebx\n"); // add left and right results
+            }
+            _ => panic!("Unsupported expression type for MASM generation: {:?}", expr)
+        }
+    }
+
+
     pub fn translate(nodes: &[IRNode], backend: Backend) -> String {
         match backend {
             Backend::JavaScript => todo!(),
             Backend::MASM => {
                 let mut out = String::new();
 
-                // Determine if any print exists
-                let has_print = nodes.iter().any(|n| if let IRNode::Function { body, .. } = n {
-                    body.iter().any(|stmt| matches!(stmt, IRNode::Print { .. }))
-                } else { false });
-
                 // MASM boilerplate
                 out.push_str(".386\n.model flat, c\n");
                 out.push_str("option casemap:none\n\n");
-                if has_print {
-                    out.push_str("extrn printf:PROC\n");
-                    out.push_str("includelib lib\\msvcrt.lib\n\n");
-                }
+
+                // declare all external functions
+                nodes.iter().for_each(|n| {
+                    if let IRNode::Function { name: _, body} = n {
+                        for stmt in body {
+                            if let IRNode::Print { args: _, } = stmt {
+                                out.push_str("extrn printf:PROC\n");
+                                out.push_str("includelib lib\\msvcrt.lib\n\n");
+                            }
+                        }
+                    }
+                });
 
                 // collect variables
                 let mut var_decls = Vec::new();
@@ -465,6 +593,21 @@ impl IRTranslator {
                                                     panic!("Unknown variable type: {:?}", name);
                                                 }
                                             }
+                                            PrintArg::Expr(e) => {
+                                                // handle expressions
+                                                if let Expr::Literal(Literal::Int(_)) = e {
+                                                    fmt_str.push_str("%d");
+                                                } else if let Expr::Literal(Literal::Float(_)) = e {
+                                                    fmt_str.push_str("%f");
+                                                } else if let Expr::Literal(Literal::String(_)) = e {
+                                                    fmt_str.push_str("%s");
+                                                } else if let Expr::Binary { left: _, op: Token::Plus, right: _} = e {
+                                                    // handle binary expressions
+                                                    fmt_str.push_str("%d");
+                                                }else {
+                                                    panic!("Unsupported expression type in print: {:?}", e);
+                                                }
+                                            }
                                         }
                                         fmt_count += 1;
                                     }
@@ -483,22 +626,19 @@ impl IRTranslator {
                 // code section
                 out.push_str("\n.code\n");
                 let mut fmt_index = 0;
+                let mut index = 0;
                 for n in nodes {
                     if let IRNode::Function { name, body } = n {
                         out.push_str(&format!("{} proc\n", name));
                         for stmt in body {
+                            // let's add labels
+                            out.push_str(&format!(".label_{}:\n", index));
+                            index += 1;
+
+
                             if let IRNode::Assign { name, value } = stmt {
-                               match value {
-                                   Literal::Int(i) => out.push_str(&format!("    mov dword ptr [{}], {}\n", name, i)),
-                                   Literal::Float(f) => {
-                                       out.push_str(&format!("    mov dword ptr [{}+4], {}\n", name, f.to_bits() >> 32));
-                                       out.push_str(&format!("    mov dword ptr [{}], {}\n", name, f.to_bits() & 0xFFFFFFFF));
-                                   },
-                                   Literal::String(s) => {
-                                       let encoded = Self::masm_encode_string(s);
-                                       out.push_str(&format!("    mov dword ptr [{}], offset {}\n", name, encoded));
-                                   },
-                               }
+                                Self::masm_gen_expr(&mut out, value, &var_decls);
+                                out.push_str(&format!("    mov dword ptr [{}], eax\n", name));
                             }
 
                             // Handle Print statements
@@ -531,6 +671,10 @@ impl IRTranslator {
                                             },
                                             _  => {}
                                         },
+                                        PrintArg::Expr(e) => {
+                                            Self::masm_gen_expr(&mut out, e, &var_decls);
+                                            out.push_str("    push eax\n");
+                                        },
                                     }
                                 }
                                 // push format label
@@ -559,10 +703,9 @@ impl IRTranslator {
 fn main() {
     let src = r#"
         main() {
-            let x, y;
-            x = 5;
-            y = 10
-            print("val=%d, %d", x,y);
+            let x = 1, y = 1;
+            let c = x + y;
+            print("res=%d", c);
         }"#;
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer);
