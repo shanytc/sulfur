@@ -15,6 +15,12 @@ pub enum Token {
     Comma,
     Assign,     // '='
     SemiColon,  // ';'
+    Less,          // <
+    LessEqual,     // <=
+    Greater,       // >
+    GreaterEqual,  // >=
+    EqualEqual,    // ==
+    BangEqual,     // !=
     EOF,
 }
 
@@ -93,7 +99,6 @@ impl Lexer {
             ')' => { self.next_char(); Token::RParen }
             '{' => { self.next_char(); Token::LBrace }
             '}' => { self.next_char(); Token::RBrace }
-            '=' => { self.next_char(); Token::Assign }
             ';' => { self.next_char(); Token::SemiColon }
             ',' => { self.next_char(); Token::Comma }
             '+' => { self.next_char(); Token::Plus }
@@ -131,6 +136,42 @@ impl Lexer {
                     ident.push(self.next_char());
                 }
                 Token::Identifier(ident)
+            }
+            '<' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::LessEqual
+                } else {
+                    Token::Less
+                }
+            }
+            '>' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::GreaterEqual
+                } else {
+                    Token::Greater
+                }
+            }
+            '=' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::EqualEqual
+                } else {
+                    Token::Assign
+                }
+            },
+            '!' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::BangEqual
+                } else {
+                    panic!("Unexpected character: {}", self.peek());
+                }
             }
             _ => {
                 panic!("Unexpected character: {}", self.peek());
@@ -214,10 +255,16 @@ impl Parser {
     pub fn parse_while(&mut self) -> IRNode {
         self.advance();
         if self.cur_token == Token::LParen { self.advance(); }
-        let cond = self.parse_expression();
+
+        // parse the condition
+        let cond = self.parse_comparison();
+
         if self.cur_token == Token::RParen { self.advance(); }
         if self.cur_token == Token::LBrace { self.advance(); }
+
+        // parse the body of the while loop
         let body = self.parse_block();
+
         if self.cur_token == Token::RBrace { self.advance(); }
         IRNode::While { cond, body }
     }
@@ -292,6 +339,26 @@ impl Parser {
 
             _ => panic!("Only constant numeric expressions are allowed in a let declaration!"),
         }
+    }
+
+    pub fn parse_comparison(&mut self) -> Expr {
+        let mut expr = self.parse_expression();
+
+        while matches!(
+            self.cur_token,
+            Token::Less | Token::LessEqual | Token::Greater | Token::GreaterEqual | Token::EqualEqual | Token::BangEqual
+        ) {
+            let op = self.cur_token.clone();
+            self.advance();
+            let rhs = self.parse_expression(); // right operand
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(rhs),
+            };
+        }
+        expr
     }
 
     pub fn parse_let(&mut self) -> IRNode {
@@ -519,7 +586,25 @@ impl IRTranslator {
                     Token::Minus => {
                         out.push_str("    sub ebx, eax\n");
                         out.push_str("    mov eax, ebx\n"); // subtract left from right
-                    }, // subtract left from right
+                    },
+                    Token::Less
+                    | Token::LessEqual
+                    | Token:: Greater
+                    | Token::GreaterEqual
+                    | Token::EqualEqual
+                    | Token::BangEqual => {
+                        out.push_str("    cmp ebx, eax\n");
+                        out.push_str("    mov eax, 0\n"); // default to false (0)
+                        match op {
+                            Token::Less => out.push_str("    setl al\n"), // set al to 1 if less
+                            Token::LessEqual => out.push_str("    setle al\n"), // set al to 1 if less or equal
+                            Token::Greater => out.push_str("    setg al\n"), // set al to 1 if greater
+                            Token::GreaterEqual => out.push_str("    setge al\n"), // set al to 1 if greater or equal
+                            Token::EqualEqual => out.push_str("    sete al\n"), // set al to 1 if equal
+                            Token::BangEqual => out.push_str("    setne al\n"), // set al to 1 if not equal
+                            _ => unreachable!("Unsupported comparison operator: {:?}", op)
+                        }
+                    },
                     _ => unreachable!("Unsupported operator generation: {:?}", op)
                 }
             }
@@ -836,9 +921,9 @@ fn main() {
     let src = r#"
         main() {
             let x = 5;
-            while (x) {
-                print("Hello, World!\n");
-                x = x - 1;
+            while (x <= 10) {
+                print("%d\n", x);
+                x = x + 1;
             }
         }"#;
     let lexer = Lexer::new(src);
