@@ -161,6 +161,10 @@ pub enum IRNode {
     VarDecl(Vec<(String, Option<Literal>)>),
     Assign { name: String, value: Expr },
     Print { args: Vec<PrintArg> },
+    While {
+        cond: Expr,
+        body: Vec<IRNode>,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -207,18 +211,30 @@ impl Parser {
         IRNode::Function { name, body }
     }
 
+    pub fn parse_while(&mut self) -> IRNode {
+        self.advance();
+        if self.cur_token == Token::LParen { self.advance(); }
+        let cond = self.parse_expression();
+        if self.cur_token == Token::RParen { self.advance(); }
+        if self.cur_token == Token::LBrace { self.advance(); }
+        let body = self.parse_block();
+        if self.cur_token == Token::RBrace { self.advance(); }
+        IRNode::While { cond, body }
+    }
+
     pub fn parse_block(&mut self) -> Vec<IRNode> {
         let mut stmts = Vec::new();
         while self.cur_token != Token::RBrace && self.cur_token != Token::EOF {
             match &self.cur_token {
                 Token::Identifier(id) if id == "print" => stmts.push(self.parse_print()),
                 Token::Identifier(id) if id == "let" => stmts.push(self.parse_let()),
+                Token::Identifier(id) if id == "while" => stmts.push(self.parse_while()),
                 // consume identifier = value
                 Token::Identifier(id) => {
                     let var_name = id.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
 
-                    // check if variable is declared, else panic!
-                    if !stmts.iter().any(|n| matches!(n, IRNode::VarDecl(decls) if decls.iter().any(|(name, _)| name == &var_name))) {
+                    // if !stmts.iter().any(|n| matches!(n, IRNode::VarDecl(decls) if decls.iter().any(|(name, _)| name == &var_name))) {
+                    if !self.constants.contains_key(&var_name) {
                         panic!("Variable '{}' hasn't been declared!", var_name);
                     }
 
@@ -468,32 +484,6 @@ impl IRTranslator {
         flush(&mut seg, &mut parts);   // tail
 
         parts.join(",")
-        // let mut parts: Vec<String> = Vec::new();
-        // let mut segment = String::new();
-        // let mut chars   = src.chars().peekable();
-        //
-        // while let Some(ch) = chars.next() {
-        //     if ch == '\\' && matches!(chars.peek(), Some('n')) {
-        //         chars.next(); // consume the 'n'
-        //
-        //         // flush any text collected so far
-        //         if !segment.is_empty() {
-        //             parts.push(format!("\"{}\"", segment.replace('"', "\"\"")));
-        //             segment.clear();
-        //         }
-        //         // push CR/LF bytes
-        //         parts.push("13,10".into());
-        //     } else {
-        //         // ordinary character – keep building current segment
-        //         segment.push(ch);
-        //     }
-        // }
-        // // flush tail if string didn’t end with \n
-        // if !segment.is_empty() {
-        //     parts.push(format!("\"{}\"", segment.replace('"', "\"\"")));
-        // }
-        //
-        // parts.join(",")
     }
 
     pub fn masm_gen_expr(
@@ -537,6 +527,218 @@ impl IRTranslator {
         }
     }
 
+    fn gen_label(counter: &mut usize) -> String {
+        let lbl = format!("label_{}", *counter);
+        *counter += 1;
+        lbl
+    }
+
+    pub fn emit_stmt(
+        out: &mut String,
+        stmt: &IRNode,
+        var_decls: &Vec<(String, &Literal)>,
+        fmt_map: &mut Vec<(String, String)>,
+        fmt_index: &mut usize,
+        lbl_counter: &mut usize,
+    ) {
+        match stmt {
+            IRNode::While { cond, body } => {
+                let entry = Self::gen_label(lbl_counter);
+                let exit  = Self::gen_label(lbl_counter);
+
+                out.push_str(&format!("{}:\n", entry));
+                IRTranslator::masm_gen_expr(out, cond, var_decls);
+                out.push_str("    cmp eax, 0\n");
+                out.push_str(&format!("    je {}\n", exit));
+
+                for inner in body {
+                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter);
+                }
+
+                out.push_str(&format!("    jmp {}\n", entry));
+                out.push_str(&format!("{}:\n", exit));
+            }
+
+            IRNode::Assign { name, value } => {
+                let entry = Self::gen_label(lbl_counter);
+                out.push_str(&format!("{}:\n", entry));
+                // let's add labels
+                Self::masm_gen_expr(out, value, var_decls);
+                out.push_str(&format!("    mov dword ptr [{}], eax\n", name));
+            }
+
+            // Handle Print statements
+            IRNode::Print { args } => {
+                let entry = Self::gen_label(lbl_counter);
+                out.push_str(&format!("{}:\n", entry));
+                let mut clean_float_stack = 0;
+                // push args in reverse order
+                let params: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
+                    args.iter().skip(1).collect()
+                } else {
+                    args.iter().collect()
+                };
+
+                for param in params.iter().rev() {
+                    match param {
+                        PrintArg::Literal(Literal::Int(i)) => out.push_str(&format!("    push {}\n", i)),
+                        PrintArg::Literal(Literal::Float(_)) => panic!("real or BCD number not allowed as parameter"),
+                        PrintArg::Literal(Literal::String(_)) => {
+                            out.push_str("    push offset ");
+                        },
+                        PrintArg::Variable(name) => match var_decls.iter().find(|(n, _)| n == name) {
+                            Some((_, Literal::Int(_))) => out.push_str(&format!("    push dword ptr [{}]\n", name)),
+                            Some((_, Literal::Float(_))) => {
+                                clean_float_stack += 1;
+                                out.push_str(&format!("    push dword ptr [{}+4]\n", name));
+                                out.push_str(&format!("    push dword ptr [{}]\n", name));
+                            },
+                            Some((_, Literal::String(_))) => {
+                                out.push_str(&format!("    lea eax, {}\n", name));
+                                out.push_str("    push eax\n");
+                            },
+                            _  => {}
+                        },
+                        PrintArg::Expr(e) => {
+                            Self::masm_gen_expr(out, e, &var_decls);
+                            out.push_str("    push eax\n");
+                        },
+                    }
+                }
+                // push format label
+                let fmt_label = &fmt_map[*fmt_index].0;
+                *fmt_index += 1;
+                out.push_str(&format!("    push offset {}\n", fmt_label));
+                out.push_str("    call printf\n");
+
+                let num_args = fmt_map[*fmt_index - 1].1.matches('%').count();
+                out.push_str(&format!("    add esp, {}\n", (num_args + 1 + clean_float_stack) * 4));
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_declarations(
+        stmt: &IRNode,
+        var_decls: &Vec<(String, &Literal)>,
+        fmt_map: &mut Vec<(String, String)>,
+        fmt_count: &mut usize,
+    ) {
+       match stmt {
+           IRNode::While { cond: _, body } => {
+                for inner_stmt in body {
+                    Self::collect_declarations(inner_stmt, var_decls, fmt_map, fmt_count);
+                }
+           }
+           IRNode::Print { args } => {
+               // check if we have string only, variable or mixed args
+               let has_string = args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::String(_))));
+               let has_variable = args.iter().any(|a| matches!(a, PrintArg::Variable(_)));
+               let has_number = args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::Int(_)))) ||
+               args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::Float(_))));
+               let mut fmt_str = String::new();
+
+               if !has_string && !has_variable && has_number {
+                   fmt_str.push_str("%d");
+                   fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%d\"")));
+                   *fmt_count += 1;
+               }
+
+               if has_string && !has_variable && !has_number {
+                   // get arg literal
+                   if let Some(PrintArg::Literal(Literal::String(name))) = args.first() {
+                       let new_name = Self::masm_encode_string(name.as_str());
+                       fmt_map.push((format!("fmt{}", fmt_count), new_name));
+                       *fmt_count += 1;
+                       return;
+                   }
+               }
+
+               if has_variable && !has_string && !has_number {
+                   // get arg variable
+                   if let Some(PrintArg::Variable(name)) = args.first() {
+                       match var_decls.iter().find(|(n, _)| n == name) {
+                           Some((_, Literal::Int(_))) => {
+                               fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%d\"")));
+                           }
+                           Some((_, Literal::Float(_))) => {
+                               fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%f\"")));
+                           }
+                           Some((_, Literal::String(_))) => {
+                               fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%s\"")));
+                           }
+                           _ => panic!("Unknown variable type: {:?}", name),
+                       }
+                       *fmt_count += 1;
+                       return;
+                   }
+               }
+
+               if has_variable && (has_string || has_number) {
+                   // check if we have a string literal as first arg
+                   if let Some(PrintArg::Literal(Literal::String(name))) = args.first() {
+                       let new_name = Self::masm_encode_string(name.as_str()).trim().to_string();
+                       fmt_map.push((format!("fmt{}", fmt_count), new_name));
+                       *fmt_count += 1;
+                   } else {
+                       panic!("String literal expected as first argument");
+                   }
+
+                   for arg in args.iter().skip(1) {
+                       match arg {
+                           PrintArg::Literal(Literal::Int(_)) => fmt_str.push_str("%d"),
+                           PrintArg::Literal(Literal::Float(_)) => fmt_str.push_str("%f"),
+                           PrintArg::Literal(Literal::String(_)) => fmt_str.push_str("%s"),
+                           PrintArg::Variable(name) => {
+                               if let Some((_, Literal::Int(_))) = var_decls.iter().find(|(n, _)| n == name) {
+                                   fmt_str.push_str("%d");
+                               } else if let Some((_, Literal::Float(_))) = var_decls.iter().find(|(n, _)| n == name) {
+                                   fmt_str.push_str("%f");
+                               } else if let Some((_, Literal::String(_))) = var_decls.iter().find(|(n, _)| n == name) {
+                                   fmt_str.push_str("%s");
+                               } else {
+                                   panic!("Unknown variable type: {:?}", name);
+                               }
+                           }
+                           PrintArg::Expr(e) => {
+                               // handle expressions
+                               if let Expr::Literal(Literal::Int(_)) = e {
+                                   fmt_str.push_str("%d");
+                               } else if let Expr::Literal(Literal::Float(_)) = e {
+                                   fmt_str.push_str("%f");
+                               } else if let Expr::Literal(Literal::String(_)) = e {
+                                   fmt_str.push_str("%s");
+                               } else if let Expr::Binary { left: _, op: Token::Plus, right: _} = e {
+                                   // handle binary expressions
+                                   fmt_str.push_str("%d");
+                               }else {
+                                   panic!("Unsupported expression type in print: {:?}", e);
+                               }
+                           }
+                       }
+                       *fmt_count += 1;
+                   }
+               }
+           }
+           _ => {}
+        }
+    }
+
+    fn collect_libs(out: &mut String ,stmt: &IRNode, libs: &mut Vec<String>) {
+        match stmt{
+            IRNode::While { cond: _, body } => {
+                for inner_stmt in body {
+                    Self::collect_libs(out, inner_stmt, libs);
+                }
+            }
+            IRNode::Print {..} => {
+                out.push_str("extrn printf:PROC\n");
+                out.push_str("includelib lib\\msvcrt.lib\n\n");
+                libs.push("msvcrt.lib".to_string());
+            }
+            _ => {}
+        }
+    }
 
     pub fn translate(nodes: &[IRNode], backend: Backend) -> (String, Vec<String>) {
         match backend {
@@ -553,11 +755,9 @@ impl IRTranslator {
                 nodes.iter().for_each(|n| {
                     if let IRNode::Function { name: _, body} = n {
                         for stmt in body {
-                            if let IRNode::Print { args: _, } = stmt {
-                                out.push_str("extrn printf:PROC\n");
-                                out.push_str("includelib lib\\msvcrt.lib\n\n");
-                                libraries.push("msvcrt.lib".to_string());
-                            }
+                            Self::collect_libs(
+                                &mut out, stmt, &mut libraries
+                            )
                         }
                     }
                 });
@@ -598,98 +798,7 @@ impl IRTranslator {
                 for n in nodes {
                     if let IRNode::Function { body, .. } = n {
                         for stmt in body {
-                            if let IRNode::Print { args } = stmt {
-
-                                // check if we have string only, variable or mixed args
-                                let has_string = args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::String(_))));
-                                let has_variable = args.iter().any(|a| matches!(a, PrintArg::Variable(_)));
-                                let has_number = args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::Int(_)))) ||
-                                                  args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::Float(_))));
-                                let mut fmt_str = String::new();
-
-                                if !has_string && !has_variable && has_number {
-                                    fmt_str.push_str("%d");
-                                    fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%d\"")));
-                                    fmt_count += 1;
-                                }
-
-                                if has_string && !has_variable && !has_number {
-                                    // get arg literal
-                                    if let Some(PrintArg::Literal(Literal::String(name))) = args.first() {
-                                        let new_name = Self::masm_encode_string(name.as_str());
-                                        fmt_map.push((format!("fmt{}", fmt_count), new_name));
-                                        fmt_count += 1;
-                                        continue;
-                                    }
-                                }
-
-                                if has_variable && !has_string && !has_number {
-                                    // get arg variable
-                                    if let Some(PrintArg::Variable(name)) = args.first() {
-                                        match var_decls.iter().find(|(n, _)| n == name) {
-                                            Some((_, Literal::Int(_))) => {
-                                                fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%d\"")));
-                                            }
-                                            Some((_, Literal::Float(_))) => {
-                                                fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%f\"")));
-                                            }
-                                            Some((_, Literal::String(_))) => {
-                                                fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%s\"")));
-                                            }
-                                            _ => panic!("Unknown variable type: {:?}", name),
-                                        }
-                                        fmt_count += 1;
-                                        continue;
-                                    }
-                                }
-
-                                if has_variable && (has_string || has_number) {
-                                    // check if we have a string literal as first arg
-                                    if let Some(PrintArg::Literal(Literal::String(name))) = args.first() {
-                                        let new_name = Self::masm_encode_string(name.as_str()).trim().to_string();
-                                        fmt_map.push((format!("fmt{}", fmt_count), new_name));
-                                        fmt_count += 1;
-                                    } else {
-                                        panic!("String literal expected as first argument");
-                                    }
-
-                                    for arg in args.iter().skip(1) {
-                                        match arg {
-                                            PrintArg::Literal(Literal::Int(_)) => fmt_str.push_str("%d"),
-                                            PrintArg::Literal(Literal::Float(_)) => fmt_str.push_str("%f"),
-                                            PrintArg::Literal(Literal::String(_)) => fmt_str.push_str("%s"),
-                                            PrintArg::Variable(name) => {
-                                                if let Some((_, Literal::Int(_))) = var_decls.iter().find(|(n, _)| n == name) {
-                                                    fmt_str.push_str("%d");
-                                                } else if let Some((_, Literal::Float(_))) = var_decls.iter().find(|(n, _)| n == name) {
-                                                    fmt_str.push_str("%f");
-                                                } else if let Some((_, Literal::String(_))) = var_decls.iter().find(|(n, _)| n == name) {
-                                                    fmt_str.push_str("%s");
-                                                } else {
-                                                    panic!("Unknown variable type: {:?}", name);
-                                                }
-                                            }
-                                            PrintArg::Expr(e) => {
-                                                // handle expressions
-                                                if let Expr::Literal(Literal::Int(_)) = e {
-                                                    fmt_str.push_str("%d");
-                                                } else if let Expr::Literal(Literal::Float(_)) = e {
-                                                    fmt_str.push_str("%f");
-                                                } else if let Expr::Literal(Literal::String(_)) = e {
-                                                    fmt_str.push_str("%s");
-                                                } else if let Expr::Binary { left: _, op: Token::Plus, right: _} = e {
-                                                    // handle binary expressions
-                                                    fmt_str.push_str("%d");
-                                                }else {
-                                                    panic!("Unsupported expression type in print: {:?}", e);
-                                                }
-                                            }
-                                        }
-                                        fmt_count += 1;
-                                    }
-
-                                }
-                            }
+                            Self::collect_declarations(stmt, &var_decls, &mut fmt_map, &mut fmt_count);
                         }
                     }
                 }
@@ -701,67 +810,15 @@ impl IRTranslator {
 
                 // code section
                 out.push_str("\n.code\n");
+
                 let mut fmt_index = 0;
+                let mut lbl_counter = 0;
+
                 for n in nodes {
                     if let IRNode::Function { name, body } = n {
                         out.push_str(&format!("{} proc\n", name));
-                        for (stmt_idx, stmt) in body.iter().enumerate() {
-
-
-                            if let IRNode::Assign { name, value } = stmt {
-                                out.push_str(&format!("label_{}:\n", stmt_idx));
-                                // let's add labels
-                                Self::masm_gen_expr(&mut out, value, &var_decls);
-                                out.push_str(&format!("    mov dword ptr [{}], eax\n", name));
-                            }
-
-                            // Handle Print statements
-                            if let IRNode::Print { args } = stmt {
-                                out.push_str(&format!("label_{}:\n", stmt_idx));
-                                let mut clean_float_stack = 0;
-                                // push args in reverse order
-                                let params: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
-                                    args.iter().skip(1).collect()
-                                } else {
-                                    args.iter().collect()
-                                };
-
-                                for param in params.iter().rev() {
-                                    match param {
-                                        PrintArg::Literal(Literal::Int(i)) => out.push_str(&format!("    push {}\n", i)),
-                                        PrintArg::Literal(Literal::Float(_)) => panic!("real or BCD number not allowed as parameter"),
-                                        PrintArg::Literal(Literal::String(_)) => {
-                                            out.push_str("    push offset ");
-                                        },
-                                        PrintArg::Variable(name) => match var_decls.iter().find(|(n, _)| n == name) {
-                                            Some((_, Literal::Int(_))) => out.push_str(&format!("    push dword ptr [{}]\n", name)),
-                                            Some((_, Literal::Float(_))) => {
-                                                clean_float_stack += 1;
-                                                out.push_str(&format!("    push dword ptr [{}+4]\n", name));
-                                                out.push_str(&format!("    push dword ptr [{}]\n", name));
-                                            },
-                                            Some((_, Literal::String(_))) => {
-                                                out.push_str(&format!("    lea eax, {}\n", name));
-                                                out.push_str("    push eax\n");
-                                            },
-                                            _  => {}
-                                        },
-                                        PrintArg::Expr(e) => {
-                                            Self::masm_gen_expr(&mut out, e, &var_decls);
-                                            out.push_str("    push eax\n");
-                                        },
-                                    }
-                                }
-                                // push format label
-                                let fmt_label = &fmt_map[fmt_index].0;
-                                fmt_index += 1;
-                                out.push_str(&format!("    push offset {}\n", fmt_label));
-                                out.push_str("    call printf\n");
-
-                                let num_args = fmt_map[fmt_index - 1].1.matches('%').count();
-                                out.push_str(&format!("    add esp, {}\n", (num_args + 1 + clean_float_stack) * 4));
-                            }
-
+                        for stmt in body.iter() {
+                            Self::emit_stmt(&mut out, stmt, &var_decls, &mut fmt_map, &mut fmt_index, &mut lbl_counter);
                         }
                         out.push_str("    xor eax, eax\n");
                         out.push_str("    ret\n");
@@ -778,11 +835,11 @@ impl IRTranslator {
 fn main() {
     let src = r#"
         main() {
-            let x = 1, y = 1;
-            let c = x - y;
-            let hello_8 = "Hello, world!!";
-            x = 5 - 1;
-            print("msg: %s", hello_8);
+            let x = 5;
+            while (x) {
+                print("Hello, World!\n");
+                x = x - 1;
+            }
         }"#;
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer);
@@ -807,52 +864,52 @@ fn main() {
     println!("{}", masm);
     println!("-------------------------------------------------");
 
-    println!("\nMASM code generated and saved to: {}", output_file);
-    // assemble, link the output file
-    let status = std::process::Command::new(masm32)
-        .arg("/c")
-        .arg("/coff")
-        .arg(format!("/Fo{}", obj_path.display()))   // <── put OBJ here
-        .arg(output_file)
-        .stdout(Stdio::null())        // hide normal output
-        .stderr(Stdio::null())
-        .status()
-        .expect("Failed to execute assembler");
-
-    if status.success() {
-        println!("Assembly successful!");
-        let libs = libs.iter()
-            .map(|lib| format!("c:\\masm32\\lib\\{}", lib))
-            .collect::<Vec<_>>();
-        // link the object file to create an executable
-        let link_status = std::process::Command::new(masm32linker)
-            .arg(obj_path.as_os_str())
-            .args(&libs)   // <── provides _printf
-            .arg("/SUBSYSTEM:CONSOLE")
-            .arg("/ENTRY:main")                 // <── bypass the CRT startup
-            .arg(format!("/OUT:{}", exe_path.display())) // <── put EXE here
+    if true {
+        println!("\nMASM code generated and saved to: {}", output_file);
+        // assemble, link the output file
+        let status = std::process::Command::new(masm32)
+            .arg("/c")
+            .arg("/coff")
+            .arg(format!("/Fo{}", obj_path.display()))   // <── put OBJ here
+            .arg(output_file)
             .stdout(Stdio::null())        // hide normal output
             .stderr(Stdio::null())
             .status()
-            .expect("Failed to execute linker");
+            .expect("Failed to execute assembler");
 
-        if link_status.success() {
-            println!("Linking successful! Executable created: test.exe");
+        if status.success() {
+            println!("Assembly successful!");
+            let libs = libs.iter()
+                .map(|lib| format!("c:\\masm32\\lib\\{}", lib))
+                .collect::<Vec<_>>();
+            // link the object file to create an executable
+            let link_status = std::process::Command::new(masm32linker)
+                .arg(obj_path.as_os_str())
+                .args(&libs)   // <── provides _printf
+                .arg("/SUBSYSTEM:CONSOLE")
+                .arg("/ENTRY:main")                 // <── bypass the CRT startup
+                .arg(format!("/OUT:{}", exe_path.display())) // <── put EXE here
+                .stdout(Stdio::null())        // hide normal output
+                .stderr(Stdio::null())
+                .status()
+                .expect("Failed to execute linker");
 
-            println!("\n----------------- RUN OUTPUT ------------------");
-            let run = Command::new(&exe_path)
-                .current_dir(work_dir)                 // optional; same dir as exe
-                .output()                              // captures stdout + stderr
-                .expect("failed to launch executable");
-            print!("{}", String::from_utf8_lossy(&run.stdout));
-            println!("\n---------------- {} ---------------------", run.status);
+            if link_status.success() {
+                println!("Linking successful! Executable created: test.exe");
+
+                println!("\n----------------- RUN OUTPUT ------------------");
+                let run = Command::new(&exe_path)
+                    .current_dir(work_dir)                 // optional; same dir as exe
+                    .output()                              // captures stdout + stderr
+                    .expect("failed to launch executable");
+                print!("{}", String::from_utf8_lossy(&run.stdout));
+                println!("\n---------------- {} ---------------------", run.status);
+            } else {
+                println!("Linking failed!");
+            }
         } else {
-            println!("Linking failed!");
+            println!("Assembly failed!");
         }
-    } else {
-        println!("Assembly failed!");
     }
-
-
 }
 
