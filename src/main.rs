@@ -87,11 +87,6 @@ impl Lexer {
     }
 
     pub fn next_token(&mut self) -> Token {
-        // Skip whitespace
-        // while self.peek().is_whitespace() {
-        //     self.next_char();
-        // }
-
         self.skip_whitespace_and_comments();
 
         match self.peek() {
@@ -205,6 +200,11 @@ pub enum IRNode {
     While {
         cond: Expr,
         body: Vec<IRNode>,
+    },
+    If {
+        cond: Expr,
+        then_branch: Vec<IRNode>,
+        else_branch: Option<Vec<IRNode>>,
     }
 }
 
@@ -252,6 +252,40 @@ impl Parser {
         IRNode::Function { name, body }
     }
 
+    pub fn parse_if(&mut self) -> IRNode {
+        self.advance(); // consume "if"
+        if self.cur_token == Token::LParen { self.advance(); }
+
+        let cond = self.parse_comparison();
+
+        if self.cur_token == Token::RParen { self.advance(); }
+        if self.cur_token == Token::LBrace { self.advance(); }
+
+        let then_branch = self.parse_block(); // parse the "then" block
+        if self.cur_token == Token::RBrace { self.advance(); }
+
+        // optional "else" block
+        let else_branch = if let Token::Identifier(id) = &self.cur_token {
+            if id == "else" {
+                self.advance(); // consume "else"
+                if self.cur_token == Token::LBrace { self.advance(); }
+                let else_body = self.parse_block();
+                if self.cur_token == Token::RBrace { self.advance(); }
+                Some(else_body)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        IRNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        }
+    }
+
     pub fn parse_while(&mut self) -> IRNode {
         self.advance();
         if self.cur_token == Token::LParen { self.advance(); }
@@ -276,6 +310,7 @@ impl Parser {
                 Token::Identifier(id) if id == "print" => stmts.push(self.parse_print()),
                 Token::Identifier(id) if id == "let" => stmts.push(self.parse_let()),
                 Token::Identifier(id) if id == "while" => stmts.push(self.parse_while()),
+                Token::Identifier(id) if id == "if" => stmts.push(self.parse_if()),
                 // consume identifier = value
                 Token::Identifier(id) => {
                     let var_name = id.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
@@ -627,6 +662,32 @@ impl IRTranslator {
         lbl_counter: &mut usize,
     ) {
         match stmt {
+            IRNode::If {cond, then_branch, else_branch} => {
+                let lbl_else = Self::gen_label(lbl_counter);
+                let lbl_end = Self::gen_label(lbl_counter);
+
+                // evaluate condition
+                Self::masm_gen_expr(out, cond, var_decls);
+                out.push_str("    cmp eax, 0\n");
+                out.push_str(&format!("    je {}\n", lbl_else));
+
+                // then-block
+                for inner in then_branch {
+                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter);
+                }
+                out.push_str(&format!("    jmp {}\n", lbl_end));
+
+                // else-block
+                out.push_str(&format!("{}:\n", lbl_else));
+                if let Some(else_branch) = else_branch {
+                    for inner in else_branch {
+                        Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter);
+                    }
+                }
+                out.push_str(&format!("    jmp {}\n", lbl_end));
+                out.push_str(&format!("{}:\n", lbl_end));
+            }
+
             IRNode::While { cond, body } => {
                 let entry = Self::gen_label(lbl_counter);
                 let exit  = Self::gen_label(lbl_counter);
@@ -685,7 +746,7 @@ impl IRTranslator {
                             _  => {}
                         },
                         PrintArg::Expr(e) => {
-                            Self::masm_gen_expr(out, e, &var_decls);
+                            Self::masm_gen_expr(out, e, var_decls);
                             out.push_str("    push eax\n");
                         },
                     }
@@ -710,6 +771,16 @@ impl IRTranslator {
         fmt_count: &mut usize,
     ) {
        match stmt {
+           IRNode::If { cond: _, then_branch, else_branch } => {
+               for inner in then_branch {
+                   Self::collect_declarations(inner, var_decls, fmt_map, fmt_count);
+               }
+               if let Some(else_branch) = else_branch {
+                   for inner in else_branch {
+                       Self::collect_declarations(inner, var_decls, fmt_map, fmt_count);
+                   }
+               }
+           }
            IRNode::While { cond: _, body } => {
                 for inner_stmt in body {
                     Self::collect_declarations(inner_stmt, var_decls, fmt_map, fmt_count);
@@ -811,15 +882,27 @@ impl IRTranslator {
 
     fn collect_libs(out: &mut String ,stmt: &IRNode, libs: &mut Vec<String>) {
         match stmt{
+            IRNode::If { cond: _, then_branch, else_branch } => {
+                for inner in then_branch {
+                    Self::collect_libs(out, inner, libs);
+                }
+                if let Some(else_branch) = else_branch {
+                    for inner in else_branch {
+                        Self::collect_libs(out, inner, libs);
+                    }
+                }
+            }
             IRNode::While { cond: _, body } => {
                 for inner_stmt in body {
                     Self::collect_libs(out, inner_stmt, libs);
                 }
             }
             IRNode::Print {..} => {
-                out.push_str("extrn printf:PROC\n");
-                out.push_str("includelib lib\\msvcrt.lib\n\n");
-                libs.push("msvcrt.lib".to_string());
+                if !libs.contains(&"msvcrt.lib".to_string()) {
+                    out.push_str("extrn printf:PROC\n");
+                    out.push_str("includelib lib\\msvcrt.lib\n\n");
+                    libs.push("msvcrt.lib".to_string());
+                }
             }
             _ => {}
         }
@@ -922,7 +1005,11 @@ fn main() {
         main() {
             let x = 5;
             while (x <= 10) {
-                print("%d\n", x);
+                if (x == 7) {
+                    print("x is 7\n");
+                } else {
+                    print("%d\n", x);
+                }
                 x = x + 1;
             }
         }"#;
