@@ -11,6 +11,7 @@ pub enum Token {
     Minus,         // -
     Star,          // *
     Slash,         // /
+    Percent ,      // %
     LParen, RParen, LBrace, RBrace,
     Comma,
     Assign,     // '='
@@ -21,6 +22,8 @@ pub enum Token {
     GreaterEqual,  // >=
     EqualEqual,    // ==
     BangEqual,     // !=
+    AndAnd,      // &&
+    OrOr,       // ||
     EOF,
 }
 
@@ -100,6 +103,25 @@ impl Lexer {
             '-' => { self.next_char(); Token::Minus }
             '*' => { self.next_char(); Token::Star }
             '/' => { self.next_char(); Token::Slash }
+            '%' => { self.next_char(); Token::Percent }
+            '&' => {
+                self.next_char();
+                if self.peek() == '&' {
+                    self.next_char();
+                    Token::AndAnd
+                } else {
+                    panic!("Unexpected character: {}", self.peek());
+                }
+            }
+            '|' => {
+                self.next_char();
+                if self.peek() == '|' {
+                    self.next_char();
+                    Token::OrOr
+                } else {
+                    panic!("Unexpected character: {}", self.peek());
+                }
+            }
             '"' => {
                 self.next_char();                 // consume opening quote
                 let mut s = String::new();
@@ -252,11 +274,31 @@ impl Parser {
         IRNode::Function { name, body }
     }
 
+    pub fn parse_logic(&mut self) -> Expr {
+        let mut expr = self.parse_comparison();
+
+        while matches!(
+            self.cur_token, Token::AndAnd | Token::OrOr
+        ){
+            let op = self.cur_token.clone();
+            self.advance();
+            let rhs = self.parse_comparison();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(rhs),
+            };
+        }
+
+        expr
+    }
+
     pub fn parse_if(&mut self) -> IRNode {
         self.advance(); // consume "if"
         if self.cur_token == Token::LParen { self.advance(); }
 
-        let cond = self.parse_comparison();
+        let cond = self.parse_logic();
 
         if self.cur_token == Token::RParen { self.advance(); }
         if self.cur_token == Token::LBrace { self.advance(); }
@@ -265,24 +307,39 @@ impl Parser {
         if self.cur_token == Token::RBrace { self.advance(); }
 
         // optional "else" block
-        let else_branch = if let Token::Identifier(id) = &self.cur_token {
+        if let Token::Identifier(id) = &self.cur_token {
             if id == "else" {
                 self.advance(); // consume "else"
-                if self.cur_token == Token::LBrace { self.advance(); }
-                let else_body = self.parse_block();
-                if self.cur_token == Token::RBrace { self.advance(); }
-                Some(else_body)
-            } else {
-                None
+                if let Token::Identifier(next) = &self.cur_token {
+                    if next == "if" {
+                        // Don’t consume a `{` here—just let parse_if handle it
+                        let nested_if = self.parse_if();
+                        // Wrap it in a one‐element Vec so it fits the Vec<IRNode> type
+                        return IRNode::If {
+                            cond,
+                            then_branch,
+                            else_branch: Some(vec![nested_if]),
+                        };
+                    }
+                }
+
+                if self.cur_token == Token::LBrace {
+                   self.advance();
+                    let else_body = self.parse_block();
+                    if self.cur_token == Token::RBrace { self.advance(); }
+                    return IRNode::If {
+                        cond,
+                        then_branch,
+                        else_branch: Some(else_body),
+                    };
+                }
             }
-        } else {
-            None
-        };
+        }
 
         IRNode::If {
             cond,
             then_branch,
-            else_branch,
+            else_branch: None,
         }
     }
 
@@ -291,7 +348,7 @@ impl Parser {
         if self.cur_token == Token::LParen { self.advance(); }
 
         // parse the condition
-        let cond = self.parse_comparison();
+        let cond = self.parse_logic();
 
         if self.cur_token == Token::RParen { self.advance(); }
         if self.cur_token == Token::LBrace { self.advance(); }
@@ -364,6 +421,89 @@ impl Parser {
                 }
             }
 
+            Expr::Binary { left, op: Token::AndAnd, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a), Literal::Int(b)) => Literal::Int((a != 0 && b != 0) as i64),
+                    (Literal::Float(a), Literal::Float(b)) => Literal::Int((a != 0.0 && b != 0.0) as i64),
+                    (Literal::Int(a), Literal::Float(b)) => Literal::Int((a != 0 && b != 0.0) as i64),
+                    (Literal::Float(a), Literal::Int(b)) => Literal::Int((a != 0.0 && b != 0) as i64),
+                    _ => panic!("Cannot evaluate logical AND on non-numeric constants"),
+                }
+            }
+            Expr::Binary { left, op: Token::OrOr, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a), Literal::Int(b)) => Literal::Int((a != 0 || b != 0) as i64),
+                    (Literal::Float(a), Literal::Float(b)) => Literal::Int((a != 0.0 || b != 0.0) as i64),
+                    (Literal::Int(a), Literal::Float(b)) => Literal::Int((a != 0 || b != 0.0) as i64),
+                    (Literal::Float(a), Literal::Int(b)) => Literal::Int((a != 0.0 || b != 0) as i64),
+                    _ => panic!("Cannot evaluate logical OR on non-numeric constants"),
+                }
+            }
+
+            Expr::Binary { left, op: Token::Percent, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a), Literal::Int(b)) => {
+                        if b == 0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Int(a % b)
+                    }
+                    (Literal::Float(a), Literal::Float(b)) => {
+                        if b == 0.0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Float(a % b)
+                    }
+                    (Literal::Int(a), Literal::Float(b)) => {
+                        if b == 0.0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Float(a as f64 % b)
+                    }
+                    (Literal::Float(a), Literal::Int(b)) => {
+                        if b == 0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Float(a % b as f64)
+                    }
+                    _ => panic!("Cannot evaluate modulo on non-numeric constants"),
+                }
+            }
+
+            Expr::Binary { left, op: Token::Star, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a),   Literal::Int(b))   => Literal::Int(a * b),
+                    (Literal::Float(a), Literal::Float(b)) => Literal::Float(a * b),
+                    (Literal::Int(a),   Literal::Float(b)) => Literal::Float(a as f64 * b),
+                    (Literal::Float(a), Literal::Int(b))   => Literal::Float(a * b as f64),
+                    _ => panic!("Cannot multiply strings in a constant expression"),
+                }
+            }
+
+            Expr::Binary { left, op: Token::Slash, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a),   Literal::Int(b))   => {
+                        if b == 0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Int(a / b)
+                    }
+                    (Literal::Float(a), Literal::Float(b)) => {
+                        if b == 0.0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Float(a / b)
+                    }
+                    (Literal::Int(a),   Literal::Float(b)) => {
+                        if b == 0.0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Float(a as f64 / b)
+                    }
+                    (Literal::Float(a), Literal::Int(b))   => {
+                        if b == 0 { panic!("Division by zero in constant expression!"); }
+                        Literal::Float(a / b as f64)
+                    }
+                    _ => panic!("Cannot divide strings in a constant expression"),
+                }
+            }
+
             Expr::Variable(name) => {
                 let var_name = name.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
                 self.constants
@@ -420,7 +560,7 @@ impl Parser {
                     self.advance();                 // eat the string token
                 } else {
                     // anything else: parse expression then fold
-                    let expr = self.parse_expression();      // returns Expr
+                    let expr = self.parse_logic();      // returns Expr
                     value = Some(self.const_eval(&expr));   // → Literal
                     self.constants.insert(name.clone(), value.clone().unwrap());
                 }
@@ -458,14 +598,30 @@ impl Parser {
         }
     }
 
-    pub fn parse_expression(&mut self) -> Expr {
+    pub fn parse_term(&mut self) -> Expr {
         let mut expr = self.parse_factor();
+        while matches!(self.cur_token, Token::Star | Token::Slash | Token::Percent) {
+            let op = self.cur_token.clone(); // save the operator
+            self.advance(); // consume the operator
+            let rhs = self.parse_factor();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(rhs),
+            }
+        }
+        expr
+    }
+
+    pub fn parse_expression(&mut self) -> Expr {
+        let mut expr = self.parse_term();
 
         // TODO: Handle binary operations like +, -, *, /
         while matches!(self.cur_token, Token::Plus | Token::Minus) {
             let op = self.cur_token.clone(); // save the '+', '-' operator
             self.advance(); // consume the operator '+'
-            let rhs = self.parse_factor();
+            let rhs = self.parse_term();
 
             expr = Expr::Binary {
                 left: Box::new(expr),
@@ -497,7 +653,7 @@ impl Parser {
        // here we want to parse assignment to a variable
         assert_eq!(self.cur_token, Token::Assign, "Expected assignment operator '='");
         self.advance(); // consume '='
-        let value = self.parse_expression();
+        let value = self.parse_logic();
         if self.cur_token == Token::SemiColon { self.advance(); }
         IRNode::Assign { name, value }
     }
@@ -529,7 +685,7 @@ impl Parser {
                 }
             } else {
                 // any other ordinary expression
-                let expr = self.parse_expression();
+                let expr = self.parse_logic();
                 args.push(PrintArg::Expr(expr));
             }
 
@@ -583,7 +739,7 @@ impl IRTranslator {
                 seg.push(ch);
             }
         }
-        flush(&mut seg, &mut parts);   // tail
+        flush(&mut seg, &mut parts);
 
         parts.join(",")
     }
@@ -622,6 +778,22 @@ impl IRTranslator {
                         out.push_str("    sub ebx, eax\n");
                         out.push_str("    mov eax, ebx\n"); // subtract left from right
                     },
+                    Token::Star => out.push_str("    imul eax, ebx\n"), // multiply left and right results
+                    Token::Slash => {
+                        // eax = left / right
+                        out.push_str("    mov ecx, eax\n");         // save divisor (= right)
+                        out.push_str("    mov eax, ebx\n");         // eax = dividend (= left)
+                        out.push_str("    cdq\n");                  // sign-extend into edx
+                        out.push_str("    idiv ecx\n");             // eax = quotient
+                    },
+                    Token::Percent => {
+                        // eax = left % right
+                        out.push_str("    mov ecx, eax\n");         // save divisor (= right)
+                        out.push_str("    mov eax, ebx\n");         // eax = dividend (= left)
+                        out.push_str("    cdq\n");                  // sign-extend into edx
+                        out.push_str("    idiv ecx\n");             // edx = remainder
+                        out.push_str("    mov eax, edx\n");         // result in eax
+                    },
                     Token::Less
                     | Token::LessEqual
                     | Token:: Greater
@@ -640,6 +812,24 @@ impl IRTranslator {
                             _ => unreachable!("Unsupported comparison operator: {:?}", op)
                         }
                     },
+                    Token::AndAnd => {
+                        /* EBX = left, EAX = right */
+                        out.push_str("    cmp ebx, 0\n");
+                        out.push_str("    setne bl\n");       // bl = (left != 0)
+                        out.push_str("    cmp eax, 0\n");
+                        out.push_str("    setne al\n");       // al  = (right != 0)
+                        out.push_str("    and al, bl\n");     // al = al & bl
+                        out.push_str("    movzx eax, al\n");  // zero-extend to eax
+                    },
+                    Token::OrOr => {
+                        /* EBX = left, EAX = right */
+                        out.push_str("    cmp ebx, 0\n");
+                        out.push_str("    setne bl\n");       // bl = (left != 0)
+                        out.push_str("    cmp eax, 0\n");
+                        out.push_str("    setne al\n");       // al  = (right != 0)
+                        out.push_str("    or al, bl\n");      // al = al | bl
+                        out.push_str("    movzx eax, al\n");  // zero-extend to eax
+                    }
                     _ => unreachable!("Unsupported operator generation: {:?}", op)
                 }
             }
@@ -660,54 +850,54 @@ impl IRTranslator {
         fmt_map: &mut Vec<(String, String)>,
         fmt_index: &mut usize,
         lbl_counter: &mut usize,
+        tail: &String,
     ) {
         match stmt {
             IRNode::If {cond, then_branch, else_branch} => {
-                let lbl_else = Self::gen_label(lbl_counter);
-                let lbl_end = Self::gen_label(lbl_counter);
+                let else_label = Self::gen_label(lbl_counter);
+                let end_label = Self::gen_label(lbl_counter);
 
-                // evaluate condition
+                // Evaluate condition
                 Self::masm_gen_expr(out, cond, var_decls);
                 out.push_str("    cmp eax, 0\n");
-                out.push_str(&format!("    je {}\n", lbl_else));
+                out.push_str(&format!("    je {}\n", else_label));
 
-                // then-block
+                // Then branch
                 for inner in then_branch {
-                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter);
+                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter, tail);
                 }
-                out.push_str(&format!("    jmp {}\n", lbl_end));
+                out.push_str(&format!("    jmp {}\n", end_label));
 
-                // else-block
-                out.push_str(&format!("{}:\n", lbl_else));
+                // Else branch
+                out.push_str(&format!("{}:\n", else_label));
                 if let Some(else_branch) = else_branch {
                     for inner in else_branch {
-                        Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter);
+                        Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter, tail);
                     }
                 }
-                out.push_str(&format!("    jmp {}\n", lbl_end));
-                out.push_str(&format!("{}:\n", lbl_end));
+                out.push_str(&format!("{}:\n", end_label));
             }
 
             IRNode::While { cond, body } => {
-                let entry = Self::gen_label(lbl_counter);
-                let exit  = Self::gen_label(lbl_counter);
+                let start_label = Self::gen_label(lbl_counter);
+                let body_end_label = Self::gen_label(lbl_counter); // End of loop body
+                let exit_label = Self::gen_label(lbl_counter);
 
-                out.push_str(&format!("{}:\n", entry));
+                out.push_str(&format!("{}:\n", start_label));
                 IRTranslator::masm_gen_expr(out, cond, var_decls);
                 out.push_str("    cmp eax, 0\n");
-                out.push_str(&format!("    je {}\n", exit));
+                out.push_str(&format!("    je {}\n", exit_label));
 
                 for inner in body {
-                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter);
+                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter, &body_end_label);
                 }
 
-                out.push_str(&format!("    jmp {}\n", entry));
-                out.push_str(&format!("{}:\n", exit));
+                out.push_str(&format!("{}:\n", body_end_label));
+                out.push_str(&format!("    jmp {}\n", start_label));
+                out.push_str(&format!("{}:\n", exit_label));
             }
 
             IRNode::Assign { name, value } => {
-                let entry = Self::gen_label(lbl_counter);
-                out.push_str(&format!("{}:\n", entry));
                 // let's add labels
                 Self::masm_gen_expr(out, value, var_decls);
                 out.push_str(&format!("    mov dword ptr [{}], eax\n", name));
@@ -715,8 +905,8 @@ impl IRTranslator {
 
             // Handle Print statements
             IRNode::Print { args } => {
-                let entry = Self::gen_label(lbl_counter);
-                out.push_str(&format!("{}:\n", entry));
+                // let entry = Self::gen_label(lbl_counter);
+                // out.push_str(&format!("{}:\n", entry));
                 let mut clean_float_stack = 0;
                 // push args in reverse order
                 let params: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
@@ -833,6 +1023,7 @@ impl IRTranslator {
                if has_variable && (has_string || has_number) {
                    // check if we have a string literal as first arg
                    if let Some(PrintArg::Literal(Literal::String(name))) = args.first() {
+                       // check if placeholders (like %d, %s) exists, else set a warning
                        let new_name = Self::masm_encode_string(name.as_str()).trim().to_string();
                        fmt_map.push((format!("fmt{}", fmt_count), new_name));
                        *fmt_count += 1;
@@ -985,8 +1176,9 @@ impl IRTranslator {
                 for n in nodes {
                     if let IRNode::Function { name, body } = n {
                         out.push_str(&format!("{} proc\n", name));
+                        let func_tail = Self::gen_label(&mut lbl_counter);
                         for stmt in body.iter() {
-                            Self::emit_stmt(&mut out, stmt, &var_decls, &mut fmt_map, &mut fmt_index, &mut lbl_counter);
+                            Self::emit_stmt(&mut out, stmt, &var_decls, &mut fmt_map, &mut fmt_index, &mut lbl_counter, &func_tail);
                         }
                         out.push_str("    xor eax, eax\n");
                         out.push_str("    ret\n");
@@ -1001,19 +1193,10 @@ impl IRTranslator {
 }
 
 fn main() {
-    let src = r#"
-        main() {
-            let x = 5;
-            while (x <= 10) {
-                if (x == 7) {
-                    print("x is 7\n");
-                } else {
-                    print("%d\n", x);
-                }
-                x = x + 1;
-            }
-        }"#;
-    let lexer = Lexer::new(src);
+    // open file called main.sf
+    let src = std::fs::read_to_string("src/main.sf")
+        .expect("Failed to read source file");
+    let lexer = Lexer::new(src.as_str());
     let mut parser = Parser::new(lexer);
     let ir = parser.parse_program();
     println!("--------------- IR OUTPUT ---------------");
