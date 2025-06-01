@@ -8,7 +8,9 @@ pub enum Token {
     StringLiteral(String),
     NumberLiteral(String),
     Plus,          // +
+    PlusAssign,  // +=
     Minus,         // -
+    MinusAssign, // -=
     Star,          // *
     Slash,         // /
     Percent ,      // %
@@ -29,9 +31,9 @@ pub enum Token {
 
 #[derive(Debug)]
 pub enum Expr {
-    Literal(Literal),          //  5   or  3.14  or  "abc"
+    Literal(Literal),          //  5 or  3.14 or "abc"
     Variable(String),          //  x
-    Binary {                   //  x + 4  or  7 + y  or  a + b
+    Binary {                   //  x + 4 or 7 + y or a + b
         left: Box<Expr>,
         op: Token,            // only Token::Plus for now
         right: Box<Expr>,
@@ -99,8 +101,24 @@ impl Lexer {
             '}' => { self.next_char(); Token::RBrace }
             ';' => { self.next_char(); Token::SemiColon }
             ',' => { self.next_char(); Token::Comma }
-            '+' => { self.next_char(); Token::Plus }
-            '-' => { self.next_char(); Token::Minus }
+            '+' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::PlusAssign
+                } else {
+                    Token::Plus
+                }
+            }
+            '-' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::MinusAssign
+                } else {
+                    Token::Minus
+                }
+            }
             '*' => { self.next_char(); Token::Star }
             '/' => { self.next_char(); Token::Slash }
             '%' => { self.next_char(); Token::Percent }
@@ -370,18 +388,57 @@ impl Parser {
                 Token::Identifier(id) if id == "if" => stmts.push(self.parse_if()),
                 // consume identifier = value
                 Token::Identifier(id) => {
+                    let base_name = id.clone();
                     let var_name = id.clone() + VAR_NAME_EXTENSION; // append _var to the variable name
-
-                    // if !stmts.iter().any(|n| matches!(n, IRNode::VarDecl(decls) if decls.iter().any(|(name, _)| name == &var_name))) {
                     if !self.constants.contains_key(&var_name) {
                         panic!("Variable '{}' hasn't been declared!", var_name);
                     }
 
                     self.advance();
-                    if self.cur_token == Token::Assign {
-                        stmts.push(self.parse_assign(var_name));
-                    } else {
-                        println!("Expected assignment after identifier '{}', found: {:?}", var_name, self.cur_token);
+                    // if self.cur_token == Token::Assign {
+                    //     stmts.push(self.parse_assign(var_name));
+                    // } else {
+                    //     println!("Expected assignment after identifier '{}', found: {:?}", var_name, self.cur_token);
+                    // }
+                    match &self.cur_token {
+                        Token::Assign => stmts.push(self.parse_assign(var_name)),
+                        Token::PlusAssign => {
+                            self.advance(); // consume the '+='
+                            let expr = self.parse_logic();
+                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let new_value = Expr::Binary {
+                                left: Box::new(lhs_expr),
+                                op: Token::Plus,
+                                right: Box::new(expr),
+                            };
+                            if self.cur_token == Token::SemiColon {
+                                self.advance(); // consume the semicolon
+                            }
+                            stmts.push(IRNode::Assign {
+                                name: var_name.clone(),
+                                value: new_value,
+                            });
+                        },
+                        Token::MinusAssign => {
+                            self.advance(); // consume the '-='
+                            let expr = self.parse_logic();
+                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let new_value = Expr::Binary {
+                                left: Box::new(lhs_expr),
+                                op: Token::Minus,
+                                right: Box::new(expr),
+                            };
+                            if self.cur_token == Token::SemiColon {
+                                self.advance(); // consume the semicolon
+                            }
+                            stmts.push(IRNode::Assign {
+                                name: var_name.clone(),
+                                value: new_value,
+                            });
+                        },
+                        _ => {
+                            println!("Expected assignment after identifier '{}', found: {:?}", var_name, self.cur_token);
+                        }
                     }
                 }
                 _ => {
