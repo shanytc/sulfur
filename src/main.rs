@@ -12,8 +12,11 @@ pub enum Token {
     Minus,         // -
     MinusAssign, // -=
     Star,          // *
+    StarAssign,  // *=
     Slash,         // /
+    SlashAssign, // /=
     Percent ,      // %
+    PercentAssign, // %=
     LParen, RParen, LBrace, RBrace,
     Comma,
     Assign,     // '='
@@ -119,9 +122,33 @@ impl Lexer {
                     Token::Minus
                 }
             }
-            '*' => { self.next_char(); Token::Star }
-            '/' => { self.next_char(); Token::Slash }
-            '%' => { self.next_char(); Token::Percent }
+            '*' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::StarAssign
+                } else {
+                    Token::Star
+                }
+            }
+            '/' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::SlashAssign
+                } else {
+                    Token::Slash
+                }
+            }
+            '%' => {
+                self.next_char();
+                if self.peek() == '=' {
+                    self.next_char();
+                    Token::PercentAssign
+                } else {
+                    Token::Percent
+                }
+            }
             '&' => {
                 self.next_char();
                 if self.peek() == '&' {
@@ -436,6 +463,57 @@ impl Parser {
                                 value: new_value,
                             });
                         },
+                        Token::StarAssign => {
+                            self.advance(); // consume the '*='
+                            let expr = self.parse_logic();
+                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let new_value = Expr::Binary {
+                                left: Box::new(lhs_expr),
+                                op: Token::Star,
+                                right: Box::new(expr),
+                            };
+                            if self.cur_token == Token::SemiColon {
+                                self.advance(); // consume the semicolon
+                            }
+                            stmts.push(IRNode::Assign {
+                                name: var_name.clone(),
+                                value: new_value,
+                            });
+                        },
+                        Token::SlashAssign => {
+                            self.advance(); // consume the '/='
+                            let expr = self.parse_logic();
+                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let new_value = Expr::Binary {
+                                left: Box::new(lhs_expr),
+                                op: Token::Slash,
+                                right: Box::new(expr),
+                            };
+                            if self.cur_token == Token::SemiColon {
+                                self.advance(); // consume the semicolon
+                            }
+                            stmts.push(IRNode::Assign {
+                                name: var_name.clone(),
+                                value: new_value,
+                            });
+                        },
+                        Token::PercentAssign => {
+                            self.advance(); // consume the '%='
+                            let expr = self.parse_logic();
+                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let new_value = Expr::Binary {
+                                left: Box::new(lhs_expr),
+                                op: Token::Percent,
+                                right: Box::new(expr),
+                            };
+                            if self.cur_token == Token::SemiColon {
+                                self.advance(); // consume the semicolon
+                            }
+                            stmts.push(IRNode::Assign {
+                                name: var_name.clone(),
+                                value: new_value,
+                            });
+                        },
                         _ => {
                             println!("Expected assignment after identifier '{}', found: {:?}", var_name, self.cur_token);
                         }
@@ -621,7 +699,9 @@ impl Parser {
                     value = Some(self.const_eval(&expr));   // → Literal
                     self.constants.insert(name.clone(), value.clone().unwrap());
                 }
-
+            } else {
+                // if no value is assigned, we just declare the variable without initialization
+                self.constants.insert(name.clone(), Literal::Int(0)); // default to 0
             }
 
             declarations.push((name, value));

@@ -1,19 +1,10 @@
 main() {
-    // let's implement fiz buzz
-    let i = 1;
-    let y = 10;
-    while (i <= 10) {
-        if (i % 3 == 0 && i % 5 == 0) {
-            print("fizzbuzz\n");
-        } else if (i % 3 == 0) {
-            print("fizz\n");
-        } else if (i % 5 == 0) {
-            print("buzz\n");
-        } else {
-            print("%d\n",i);
-        }
-        print("y = %d\n", y);
-        y -= 1;
-        i += 1;
+    let a, b, c;
+    b = 1;
+    while (a < 1000000) {
+        print("%d\n", a);
+        c = a + b;
+        a = b;
+        b = c;
     }
 }
