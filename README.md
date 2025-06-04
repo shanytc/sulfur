@@ -11,7 +11,7 @@
 
 ### Hello World
 ```c
-main() {
+fn main() {
     print("Hello, World!\n");
 }
 ```
