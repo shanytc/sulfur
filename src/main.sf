@@ -1,15 +1,18 @@
-fn show(b) {
-    let c = 5;
-    while (b > 0) {
-        if (b == 5) {
-            print("b is 5\n");
+fn fizz_buzz(n) {
+    while (n > 0) {
+        if (n % 3 == 0 && n % 5 == 0) {
+            print("FizzBuzz\n");
+        } else if (n % 3 == 0) {
+            print("Fizz\n");
+        } else if (n % 5 == 0) {
+            print("Buzz\n");
         } else {
-            print("res=%d\n",b);
+            print("%d\n", n);
         }
-        b = b - 1;
+        n = n - 1;
     }
 }
 
 fn main() {
-   show(7);
+   fizz_buzz(10);
 }
