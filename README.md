@@ -9,6 +9,17 @@
 
 # Code Examples
 
+### Hello World
+```c
+main() {
+    print("Hello, World!\n");
+}
+```
+
+```bash
+Hello, World!
+```
+
 ### Fib sequence
 ```c
 main() {
@@ -55,4 +66,38 @@ main() {
 317811
 514229
 832040
+```
+### FizzBuzz
+```c
+fn fizz_buzz(n) {
+    while (n > 0) {
+        if (n % 3 == 0 && n % 5 == 0) {
+            print("FizzBuzz\n");
+        } else if (n % 3 == 0) {
+            print("Fizz\n");
+        } else if (n % 5 == 0) {
+            print("Buzz\n");
+        } else {
+            print("%d\n", n);
+        }
+        n = n - 1;
+    }
+}
+
+fn main() {
+   fizz_buzz(10);
+}
+```
+
+```bash
+Buzz
+Fizz
+8
+7
+Fizz
+Buzz
+4
+Fizz
+2
+1
 ```
