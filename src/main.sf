@@ -1,4 +1,4 @@
-main() {
+fn fib(){
     let a, b, c;
     b = 1;
     while (a < 1000000) {
@@ -7,4 +7,19 @@ main() {
         a = b;
         b = c;
     }
+}
+
+fn sum(a, b) -> int {
+    return a + b;
+}
+
+fn stringy() -> string {
+    return "Hello, World!";
+}
+
+fn main() {
+    let result;
+    fib();
+    result = sum(5, 10);
+    print("Sum: %d\n", result);
 }
