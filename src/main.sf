@@ -1,25 +1,15 @@
-fn fib(){
-    let a, b, c;
-    b = 1;
-    while (a < 1000000) {
-        print("%d\n", a);
-        c = a + b;
-        a = b;
-        b = c;
+fn show(b) {
+    let c = 5;
+    while (b > 0) {
+        if (b == 5) {
+            print("b is 5\n");
+        } else {
+            print("res=%d\n",b);
+        }
+        b = b - 1;
     }
 }
 
-fn sum(a, b) -> int {
-    return a + b;
-}
-
-fn stringy() -> string {
-    return "Hello, World!";
-}
-
 fn main() {
-    let result;
-    fib();
-    result = sum(5, 10);
-    print("Sum: %d\n", result);
+   show(7);
 }

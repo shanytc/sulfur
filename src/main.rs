@@ -380,6 +380,8 @@ impl Parser {
                     };
 
                     // TODO: assume all parameters are Int for simplicity for now
+                    let scoped = self.scoped(param_name.as_str());
+                    self.constants.insert(scoped, Literal::Int(0)); // default to 0
                     params.push((param_name, Type::Int)); // default to Int type for simplicity
 
                     if self.cur_token == Token::Comma {
@@ -425,6 +427,11 @@ impl Parser {
         }
 
         let prev_func = self.current_func.replace(name.clone());
+
+        for (param_name, _) in &params {
+            let scoped = self.scoped(param_name.as_str());
+            self.constants.insert(scoped, Literal::Int(0)); // default to 0
+        }
 
         let body = self.parse_block();
 
@@ -546,7 +553,10 @@ impl Parser {
         while self.cur_token != Token::RBrace && self.cur_token != Token::EOF {
             match &self.cur_token {
                 Token::Identifier(id) if id == "print" => stmts.push(self.parse_print()),
-                Token::Identifier(id) if id == "let" => stmts.push(self.parse_let()),
+                Token::Identifier(id) if id == "let" => {
+                    let mut more = self.parse_let();
+                    stmts.append(&mut more);
+                },
                 Token::Identifier(id) if id == "while" => stmts.push(self.parse_while()),
                 Token::Identifier(id) if id == "if" => stmts.push(self.parse_if()),
                 Token::Identifier(id) if id == "return" => stmts.push(self.parse_return()),
@@ -797,10 +807,10 @@ impl Parser {
                 }
             }
 
-            Expr::Variable(name) => {
-                let var_name = self.scoped(name.clone().as_str()); // append _var to the variable name
+            Expr::Variable(var_name) => {
+                // let var_name = self.scoped(name.clone().as_str()); // append _var to the variable name
                 self.constants
-                    .get(&var_name)
+                    .get(var_name)
                     .cloned()
                     .unwrap_or_else(|| panic!("Variable '{}' is not declared!", var_name))
             }
@@ -829,9 +839,19 @@ impl Parser {
         expr
     }
 
-    pub fn parse_let(&mut self) -> IRNode {
+    fn is_const_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(_) => true,
+            Expr::Binary { left, right, .. } => Self::is_const_expr(left) && Self::is_const_expr(right),
+            _ => false, // function calls are not constant expressions
+        }
+    }
+
+    pub fn parse_let(&mut self) -> Vec<IRNode> {
         self.advance(); // consume "let"
-        let mut declarations: Vec<(String, Option<Literal>)> = Vec::new();
+        // let mut declarations: Vec<(String, Option<Literal>)> = Vec::new();
+        let mut declarations = Vec::new();
+        let mut init_stmts = Vec::new();
 
         loop {
             let name = match &self.cur_token {
@@ -843,26 +863,29 @@ impl Parser {
                 _ => panic!("Expected identifier after let, found: {:?}", self.cur_token),
             };
 
-            let mut value: Option<Literal> = None;
-            if self.cur_token == Token::Assign {
-                self.advance();  // consume the '='
-
-                // strings: keep the old direct path
-                if let Token::StringLiteral(_) = &self.cur_token {
-                    value = Some(Self::parse_literal(&self.cur_token));
-                    self.advance();                 // eat the string token
-                } else {
-                    // anything else: parse expression then fold
-                    let expr = self.parse_logic();      // returns Expr
-                    value = Some(self.const_eval(&expr));   // → Literal
-                    self.constants.insert(name.clone(), value.clone().unwrap());
-                }
-            } else {
-                // if no value is assigned, we just declare the variable without initialization
-                self.constants.insert(name.clone(), Literal::Int(0)); // default to 0
+            if self.constants.contains_key(&name) {
+                panic!("Variable '{}' is already declared!", name);
             }
 
-            declarations.push((name, value));
+            let mut lit_val: Option<Literal> = None;
+            if self.cur_token == Token::Assign {
+                self.advance(); // consume the '='
+                let expr = self.parse_logic(); // parse the rhs expression
+
+                if Self::is_const_expr(&expr) {
+                    // compile time constant expression
+                    let lit = self.const_eval(&expr);
+                    self.constants.insert(name.clone(), lit.clone());
+                    lit_val = Some(lit);
+                } else {
+                    init_stmts.push(IRNode::Assign { name: name.clone(), value: expr });
+                    self.constants.insert(name.clone(), Literal::Int(0));
+                }
+            } else {
+               self.constants.insert(name.clone(), Literal::Int(0)); // default to 0
+            }
+
+            declarations.push((name, lit_val));
 
             match &self.cur_token {
                 Token::Comma => self.advance(), // consume the comma
@@ -874,7 +897,10 @@ impl Parser {
             }
         }
 
-        IRNode::VarDecl(declarations)
+        // IRNode::VarDecl(declarations)
+        let mut nodes = vec![IRNode::VarDecl(declarations)];
+        nodes.extend(init_stmts);
+        nodes
     }
 
     pub fn parse_factor(&mut self) -> Expr {
@@ -1197,8 +1223,6 @@ impl IRTranslator {
         out: &mut String,
         stmt: &IRNode,
         var_decls: &Vec<(String, &Literal)>,
-        fmt_map: &mut Vec<(String, String)>,
-        fmt_index: &mut usize,
         lbl_counter: &mut usize,
         tail: &String,
         functions: &HashMap<String, (Vec<(String, Type)>, Type)>,
@@ -1216,7 +1240,7 @@ impl IRTranslator {
 
                 // Then branch
                 for inner in then_branch {
-                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter, tail, functions, lit_table);
+                    Self::emit_stmt(out, inner, var_decls, lbl_counter, tail, functions, lit_table);
                 }
                 out.push_str(&format!("    jmp {}\n", end_label));
 
@@ -1224,7 +1248,7 @@ impl IRTranslator {
                 out.push_str(&format!("{}:\n", else_label));
                 if let Some(else_branch) = else_branch {
                     for inner in else_branch {
-                        Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter, tail, functions, lit_table);
+                        Self::emit_stmt(out, inner, var_decls, lbl_counter, tail, functions, lit_table);
                     }
                 }
                 out.push_str(&format!("{}:\n", end_label));
@@ -1241,7 +1265,7 @@ impl IRTranslator {
                 out.push_str(&format!("    je {}\n", exit_label));
 
                 for inner in body {
-                    Self::emit_stmt(out, inner, var_decls, fmt_map, fmt_index, lbl_counter, &body_end_label, functions, lit_table);
+                    Self::emit_stmt(out, inner, var_decls, lbl_counter, &body_end_label, functions, lit_table);
                 }
 
                 out.push_str(&format!("{}:\n", body_end_label));
@@ -1257,50 +1281,95 @@ impl IRTranslator {
 
             // Handle Print statements
             IRNode::Print { args } => {
-                // let entry = Self::gen_label(lbl_counter);
-                // out.push_str(&format!("{}:\n", entry));
-                let mut clean_float_stack = 0;
+                let mut pushes = 0;
+                // declare literals
+                let mut fmt_builder = String::new();
+
                 // push args in reverse order
-                let params: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
+                let original_fmt = args.first();
+                let args: Vec<&PrintArg> = if let PrintArg::Literal(Literal::String(_)) = &args[0] {
                     args.iter().skip(1).collect()
                 } else {
                     args.iter().collect()
                 };
 
-                for param in params.iter().rev() {
+                for param in args.iter().rev() {
                     match param {
-                        PrintArg::Literal(Literal::Int(i)) => out.push_str(&format!("    push {}\n", i)),
-                        PrintArg::Literal(Literal::Float(_)) => panic!("real or BCD number not allowed as parameter"),
-                        PrintArg::Literal(Literal::String(_)) => {
-                            out.push_str("    push offset ");
+                        PrintArg::Literal(Literal::Int(i)) => {
+                            out.push_str(&format!("    push {}\n", i));
+                            fmt_builder.push_str("%d");
+                            pushes += 1;
+                        },
+                        PrintArg::Literal(Literal::Float(f)) => {
+                            let lbl = IRTranslator::intern_literal(lit_table, &format!("{}", f));
+                            out.push_str(&format!("    fld  qword ptr [{}]\n", lbl)); // …optional
+                            out.push_str(&format!("    push dword ptr [{}+4]\n", lbl));
+                            out.push_str(&format!("    push dword ptr [{}]\n",   lbl));
+                            fmt_builder.push_str("%f");
+                            pushes += 2;
+                        }
+                        PrintArg::Literal(Literal::String(s)) => {
+                            let lbl = IRTranslator::intern_literal(lit_table, s);
+                            out.push_str(&format!("    push offset {}\n", lbl));
+                            fmt_builder.push_str("%s");
+                            pushes += 1;
                         },
                         PrintArg::Variable(name) => match var_decls.iter().find(|(n, _)| n == name) {
-                            Some((_, Literal::Int(_))) => out.push_str(&format!("    push dword ptr [{}]\n", name)),
+                            Some((_, Literal::Int(_))) => {
+                                out.push_str(&format!("    push dword ptr [{}]\n", name));
+                                fmt_builder.push_str("%d");
+                                pushes += 1;
+                            },
                             Some((_, Literal::Float(_))) => {
-                                clean_float_stack += 1;
                                 out.push_str(&format!("    push dword ptr [{}+4]\n", name));
                                 out.push_str(&format!("    push dword ptr [{}]\n", name));
+                                fmt_builder.push_str("%f");
+                                pushes += 2;
                             },
                             Some((_, Literal::String(_))) => {
                                 out.push_str(&format!("    lea eax, {}\n", name));
                                 out.push_str("    push eax\n");
+                                fmt_builder.push_str("%s");
+                                pushes += 1;
                             },
-                            _  => {}
+                            _  => {
+                                panic!("Variable '{}' not found in declarations", name);
+                            }
                         },
                         PrintArg::Expr(e) => {
                             Self::masm_generator(out, e, var_decls, functions, lit_table);
                             out.push_str("    push eax\n");
+                            fmt_builder.push_str("%d");
+                            pushes += 1;
                         },
                     }
                 }
-                // push format label
-                let fmt_label = &fmt_map[*fmt_index].0;
-                *fmt_index += 1;
-                out.push_str(&format!("    push offset {}\n", fmt_label));
-                out.push_str("    call printf\n");
 
-                let num_args = fmt_map[*fmt_index - 1].1.matches('%').count();
-                out.push_str(&format!("    add esp, {}\n", (num_args + 1 + clean_float_stack) * 4));
+                let (_, enc_fmt) = match original_fmt {
+                    // user gave a literal → raw is *exactly* that string
+                    Some(PrintArg::Literal(Literal::String(s))) => {
+                        let enc = IRTranslator::masm_encode_string(s);  // encode once
+                        (s.clone(), enc)
+                    }
+
+                    // no literal → we built an automatic "%d%f..." in fmt_text;
+                    // it still needs encoding for MASM.
+                    Some(_) => {
+                        let raw = format!("{fmt_builder}\\n");
+                        let enc = IRTranslator::masm_encode_string(&raw);
+                        (raw, enc)
+                    }
+
+                    None => panic!("print() called with no arguments"),
+                };
+
+                // Re-use existing literal label if present
+                let fmt_lbl = IRTranslator::intern_literal(lit_table, &enc_fmt);
+                out.push_str(&format!("    push offset {fmt_lbl}\n"));
+                pushes += 1;
+
+                out.push_str("    call printf\n");
+                out.push_str(&format!("    add esp, {}\n", pushes * 4));
             }
             IRNode::Call { name, args } => {
                 // generate code for function call
@@ -1321,123 +1390,6 @@ impl IRTranslator {
                 out.push_str(&format!("    jmp {}\n", tail)); // jump to the end of the function
             }
             _ => {}
-        }
-    }
-
-    fn collect_declarations(
-        stmt: &IRNode,
-        var_decls: &Vec<(String, &Literal)>,
-        fmt_map: &mut Vec<(String, String)>,
-        fmt_count: &mut usize,
-    ) {
-       match stmt {
-           IRNode::If { cond: _, then_branch, else_branch } => {
-               for inner in then_branch {
-                   Self::collect_declarations(inner, var_decls, fmt_map, fmt_count);
-               }
-               if let Some(else_branch) = else_branch {
-                   for inner in else_branch {
-                       Self::collect_declarations(inner, var_decls, fmt_map, fmt_count);
-                   }
-               }
-           }
-           IRNode::While { cond: _, body } => {
-                for inner_stmt in body {
-                    Self::collect_declarations(inner_stmt, var_decls, fmt_map, fmt_count);
-                }
-           }
-           IRNode::Print { args } => {
-               // check if we have string only, variable or mixed args
-               let has_string = args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::String(_))));
-               let has_variable = args.iter().any(|a| matches!(a, PrintArg::Variable(_)));
-               let has_number = args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::Int(_)))) ||
-               args.iter().any(|a| matches!(a, PrintArg::Literal(Literal::Float(_))));
-               let mut fmt_str = String::new();
-
-               if !has_string && !has_variable && has_number {
-                   fmt_str.push_str("%d");
-                   fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%d\"")));
-                   *fmt_count += 1;
-               }
-
-               if has_string && !has_variable && !has_number {
-                   // get arg literal
-                   if let Some(PrintArg::Literal(Literal::String(name))) = args.first() {
-                       let new_name = Self::masm_encode_string(name.as_str());
-                       fmt_map.push((format!("fmt{}", fmt_count), new_name));
-                       *fmt_count += 1;
-                       return;
-                   }
-               }
-
-               if has_variable && !has_string && !has_number {
-                   // get arg variable
-                   if let Some(PrintArg::Variable(name)) = args.first() {
-                       match var_decls.iter().find(|(n, _)| n == name) {
-                           Some((_, Literal::Int(_))) => {
-                               fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%d\"")));
-                           }
-                           Some((_, Literal::Float(_))) => {
-                               fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%f\"")));
-                           }
-                           Some((_, Literal::String(_))) => {
-                               fmt_map.push((format!("fmt{}", fmt_count), String::from("\"%s\"")));
-                           }
-                           _ => panic!("Unknown variable type: {:?}", name),
-                       }
-                       *fmt_count += 1;
-                       return;
-                   }
-               }
-
-               if has_variable && (has_string || has_number) {
-                   // check if we have a string literal as first arg
-                   if let Some(PrintArg::Literal(Literal::String(name))) = args.first() {
-                       // check if placeholders (like %d, %s) exists, else set a warning
-                       let new_name = Self::masm_encode_string(name.as_str()).trim().to_string();
-                       fmt_map.push((format!("fmt{}", fmt_count), new_name));
-                       *fmt_count += 1;
-                   } else {
-                       panic!("String literal expected as first argument");
-                   }
-
-                   for arg in args.iter().skip(1) {
-                       match arg {
-                           PrintArg::Literal(Literal::Int(_)) => fmt_str.push_str("%d"),
-                           PrintArg::Literal(Literal::Float(_)) => fmt_str.push_str("%f"),
-                           PrintArg::Literal(Literal::String(_)) => fmt_str.push_str("%s"),
-                           PrintArg::Variable(name) => {
-                               if let Some((_, Literal::Int(_))) = var_decls.iter().find(|(n, _)| n == name) {
-                                   fmt_str.push_str("%d");
-                               } else if let Some((_, Literal::Float(_))) = var_decls.iter().find(|(n, _)| n == name) {
-                                   fmt_str.push_str("%f");
-                               } else if let Some((_, Literal::String(_))) = var_decls.iter().find(|(n, _)| n == name) {
-                                   fmt_str.push_str("%s");
-                               } else {
-                                   panic!("Unknown variable type: {:?}", name);
-                               }
-                           }
-                           PrintArg::Expr(e) => {
-                               // handle expressions
-                               if let Expr::Literal(Literal::Int(_)) = e {
-                                   fmt_str.push_str("%d");
-                               } else if let Expr::Literal(Literal::Float(_)) = e {
-                                   fmt_str.push_str("%f");
-                               } else if let Expr::Literal(Literal::String(_)) = e {
-                                   fmt_str.push_str("%s");
-                               } else if let Expr::Binary { left: _, op: Token::Plus, right: _} = e {
-                                   // handle binary expressions
-                                   fmt_str.push_str("%d");
-                               }else {
-                                   panic!("Unsupported expression type in print: {:?}", e);
-                               }
-                           }
-                       }
-                       *fmt_count += 1;
-                   }
-               }
-           }
-           _ => {}
         }
     }
 
@@ -1500,10 +1452,22 @@ impl IRTranslator {
     fn collect_literals(stmt: &IRNode, pool: &mut HashMap<String, String>) {
         match stmt {
             IRNode::Print { args} => {
-                for a in args {
-                    if let PrintArg::Literal(Literal::String(s)) = a {
-                        Self::intern_literal(pool, s);
+                if let Some(PrintArg::Literal(Literal::String(s))) = args.first() {
+                    let var = Self::masm_encode_string(s.clone().as_str());
+                    Self::intern_literal(pool, &var); // add to the pool → lit1, lit2, …
+                } else {
+                    let mut fmt = String::new();
+                    for p in args {
+                        match p {
+                            PrintArg::Literal(Literal::Float(_))          => fmt.push_str("%f"),
+                            PrintArg::Literal(Literal::String(_))         => fmt.push_str("%s"),
+                            // Int literals, variables and expressions all use %d
+                            _                                             => fmt.push_str("%d"),
+                        }
                     }
+                    fmt.push_str("\\n");          // trailing CR/LF just like emit_stmt
+                    let enc = Self::masm_encode_string(&fmt);
+                    Self::intern_literal(pool, &enc); // add to the pool → lit1, lit2, …
                 }
             }
             IRNode::Assign {value, ..} | IRNode::Return(Some(value)) => Self::scan_expr(value, pool),
@@ -1531,6 +1495,31 @@ impl IRTranslator {
             },
             IRNode::VarDecl(_) | IRNode::Function {..} => {
                 // no literals to collect in these nodes
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_vars<'a>(stmt: &'a IRNode, out: &mut Vec<(String, &'a Literal)>) {
+        match stmt {
+            IRNode::VarDecl(decls) => {
+                for (name, value) in decls {
+                    // If the value is None, we assume it's 0
+                    let lit = value.as_ref().unwrap_or(&Literal::Int(0));
+                    out.push((name.clone(), lit));
+                }
+            }
+            IRNode::If { cond: _, then_branch, else_branch } => {
+                for s in then_branch { Self::collect_vars(s, out); }
+                if let Some(else_branch) = else_branch {
+                    for s in else_branch { Self::collect_vars(s, out); }
+                }
+            }
+
+            IRNode::While { body, ..} => {
+                for s in body {
+                    Self::collect_vars(s, out);
+                }
             }
             _ => {}
         }
@@ -1565,26 +1554,23 @@ impl IRTranslator {
                 // collect variables
                 let mut var_decls = Vec::new();
                 for n in nodes {
-                    if let IRNode::Function { name: func_name, params, return_type: _, body } = n {
-                        for stmt in body {
-                            if let IRNode::VarDecl(decls) = stmt {
-                                for (name, value) in decls {
-                                    // If the value is None, we assume it's 0
-                                    let lit = value.as_ref().unwrap_or(&Literal::Int(0));
-                                    var_decls.push((name.clone(), lit));
-                                }
-                            }
-                        }
-
+                    if let IRNode::Function { body, params, name: func_name, .. } = n {
+                        // parameters
                         for (_name, _) in params {
-                            let var_name = format!("{}_{}{VAR_NAME_EXTENSION}", func_name, _name); // append _var to the variable name
-                            var_decls.push((var_name.clone(), &Literal::Int(0))); // default to 0
+                            let v = format!("{func_name}_{_name}{VAR_NAME_EXTENSION}");
+                            var_decls.push((v, &Literal::Int(0)));
+                        }
+                        // every VarDecl anywhere in the body
+                        for stmt in body {
+                            Self::collect_vars(stmt, &mut var_decls);
                         }
                     }
                 }
 
                 // data section
                 out.push_str(".data\n");
+
+                // declare variables
                 for (name, value) in &var_decls {
                     match value {
                         Literal::Int(i) => out.push_str(&format!("{} dd {}\n", name, i)),
@@ -1596,40 +1582,23 @@ impl IRTranslator {
                     }
                 }
 
-                // Compile format strings for print statements
-                let mut fmt_map: Vec<(String, String)> = Vec::new(); // (label, fmt)
-                let mut fmt_count = 0;
-
-                // Iterate through nodes to find print statements and build format strings
+                // collect literals from all functions
                 for n in nodes {
-                    if let IRNode::Function { body, .. } = n {
-                        for stmt in body {
-                            Self::collect_declarations(stmt, &var_decls, &mut fmt_map, &mut fmt_count);
-                        }
-                    }
-                }
-
-                // Add format strings to data section
-                for (lbl, fmt) in &fmt_map {
-                    out.push_str(&format!("{} db {},0\n", lbl, fmt));
-                }
-
-                for n in nodes {
-                    if let IRNode::Function { body, .. } = n {
+                    if let IRNode::Function { name: _, params: _, return_type: _, body } = n {
                         for stmt in body {
                             Self::collect_literals(stmt, &mut lit_table);
                         }
                     }
                 }
 
-                for (src,lbl) in lit_table.iter().map(|(s,l)| (s,l)).collect::<Vec<_>>() {
-                    out.push_str(&format!("{} db {},0\n", lbl, IRTranslator::masm_encode_string(src)));
+                // declare literals
+                for (src, lbl) in &lit_table {
+                    out.push_str(&format!("{} db {},0\n", lbl, src));
                 }
 
                 // code section
                 out.push_str("\n.code\n");
 
-                let mut fmt_index = 0;
                 let mut lbl_counter = 0;
 
                 for n in nodes {
@@ -1650,7 +1619,7 @@ impl IRTranslator {
                         let func_tail = Self::gen_label(&mut lbl_counter);
 
                         for stmt in body.iter() {
-                            Self::emit_stmt(&mut out, stmt, &var_decls, &mut fmt_map, &mut fmt_index, &mut lbl_counter, &func_tail, functions, &mut lit_table);
+                            Self::emit_stmt(&mut out, stmt, &var_decls, &mut lbl_counter, &func_tail, functions, &mut lit_table);
                         }
 
                         // remove 'jmp func_tail' if it is the last statement
