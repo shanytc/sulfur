@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -33,14 +33,18 @@ pub enum Token {
     EOF,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Literal(Literal),          //  5 or  3.14 or "abc"
     Variable(String),          //  x
     Binary {                   //  x + 4 or 7 + y or a + b
         left: Box<Expr>,
-        op: Token,            // only Token::Plus, Token::Minus, etc.
+        op: Token,            // Token::Plus, Token::Minus, etc.
         right: Box<Expr>,
+    },
+    Unary {
+        op: Token,            // Token::Star (pointers)
+        expr: Box<Expr>,      // the expression to apply the unary operator to
     },
     Call {
         name: String,         // function name
@@ -56,8 +60,28 @@ pub struct Lexer {
 
 const VAR_NAME_EXTENSION: &str = "_var";
 
+static RUNTIME_LOOKUP: &[(&str, &str)] = &[
+    // C runtime
+    ("printf", "msvcrt.lib"),
+    ("scanf",  "msvcrt.lib"),
+    ("malloc", "msvcrt.lib"),
+    ("free",   "msvcrt.lib"),
+    ("memcpy", "msvcrt.lib"),
+    // Win32 kernel (examples)
+    ("CreateFileA", "kernel32.lib"),
+    ("CloseHandle", "kernel32.lib"),
+];
+
 fn lit_label(idx: usize) -> String {
     format!("lit{}", idx)
+}
+
+fn lib_for(sym: &str) -> &'static str {
+    RUNTIME_LOOKUP
+        .iter()
+        .find(|(s, _)| *s == sym)
+        .map(|(_, lib)| *lib)
+        .unwrap_or("msvcrt.lib")           // sensible default
 }
 
 impl Lexer {
@@ -304,6 +328,10 @@ pub enum IRNode {
         args: Vec<Expr>, // arguments to the function
     },
     Return(Option<Expr>),
+    Store {
+        dst: Expr,   // address (*dst = value)
+        value: Expr, // rhs value
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -563,7 +591,6 @@ impl Parser {
                 // consume identifier = value
                 Token::Identifier(id) => {
                     // check for function call
-
                     if let Token::Identifier(fname) = &self.cur_token {
                         let name = fname.clone();
                         if self.lexer.input.get(self.lexer.pos).cloned() == Some('(') {
@@ -590,11 +617,7 @@ impl Parser {
                     }
 
                     self.advance();
-                    // if self.cur_token == Token::Assign {
-                    //     stmts.push(self.parse_assign(var_name));
-                    // } else {
-                    //     println!("Expected assignment after identifier '{}', found: {:?}", var_name, self.cur_token);
-                    // }
+
                     match &self.cur_token {
                         Token::Assign => stmts.push(self.parse_assign(var_name)),
                         Token::PlusAssign => {
@@ -682,10 +705,36 @@ impl Parser {
                                 value: new_value,
                             });
                         },
+                        Token::Star => {
+                            self.advance(); // consume the '*'
+                            let addr_expr = self.parse_factor();
+                            assert_eq!(self.cur_token, Token::Assign, "Expected '=' after '*expression'");
+                            self.advance(); // consume the '='
+                            let rhs = self.parse_logic();
+                            if self.cur_token == Token::SemiColon {
+                                self.advance(); // consume the semicolon
+                            }
+                            stmts.push(IRNode::Store {
+                                dst: addr_expr,
+                                value: rhs,
+                            });
+                        }
                         _ => {
                             println!("Expected assignment after identifier '{}', found: {:?}", var_name, self.cur_token);
                         }
                     }
+                }
+                Token::Star => {
+                    self.advance();                      // consume '*'
+                    let addr_expr = self.parse_factor(); // address expression (e.g. Variable("main_a_var"))
+                    assert_eq!(self.cur_token, Token::Assign,
+                               "Expected '=' after pointer destination");
+                    self.advance();                      // consume '='
+                    let rhs = self.parse_logic();        // right-hand side
+                    if self.cur_token == Token::SemiColon {
+                        self.advance();                  // optional ';'
+                    }
+                    stmts.push(IRNode::Store { dst: addr_expr, value: rhs });
                 }
                 _ => {
                     // println!("Expected statement, found: {:?}", self.cur_token);
@@ -904,6 +953,16 @@ impl Parser {
     }
 
     pub fn parse_factor(&mut self) -> Expr {
+        // pointer dereference
+        if self.cur_token == Token::Star {
+            self.advance(); // consume '*'
+            let inner = self.parse_factor();
+            return Expr::Unary {
+                op: Token::Star,
+                expr: Box::new(inner),
+            };
+        }
+
         match &self.cur_token {
             Token::NumberLiteral(_) | Token::StringLiteral(_) => {
                 let lit = Self::parse_literal(&self.cur_token);
@@ -1110,8 +1169,8 @@ impl IRTranslator {
             }
             Expr::Literal(Literal::String(s)) => {
                 let lbl = Self::intern_literal(lit_table, s);
-
-                out.push_str(&format!("    lea eax, {}\n", lbl));            }
+                out.push_str(&format!("    lea eax, {}\n", lbl));
+            }
             Expr::Variable(name) => {
                 let name = name.to_owned(); // append _var to the variable name
                 if let Some((_, Literal::Int(_))) = var_decls.iter().find(|(n, _)| *n == name) {
@@ -1191,6 +1250,10 @@ impl IRTranslator {
                     }
                     _ => unreachable!("Unsupported operator generation: {:?}", op)
                 }
+            }
+            Expr::Unary { op: _, expr } => {
+                Self::masm_generator(out, expr, var_decls, functions, lit_table);
+                out.push_str("    mov eax, dword ptr [eax]\n"); // load the value into EAX
             }
             Expr::Call { name, args } => {
                 // Evaluate args right-to-left, push them on the stack
@@ -1371,6 +1434,15 @@ impl IRTranslator {
                 out.push_str("    call printf\n");
                 out.push_str(&format!("    add esp, {}\n", pushes * 4));
             }
+            IRNode::Store { dst, value} => {
+                // evaluate rhs first into edx
+                Self::masm_generator(out, value, var_decls, functions, lit_table);
+                out.push_str("    mov edx, eax\n"); // move value to edx
+
+                // evaluate address into eax
+                Self::masm_generator(out, dst, var_decls, functions, lit_table);
+                out.push_str("    mov dword ptr [eax], edx\n"); // store value in destination
+            }
             IRNode::Call { name, args } => {
                 // generate code for function call
                 for arg in args {
@@ -1393,31 +1465,93 @@ impl IRTranslator {
         }
     }
 
-    fn collect_libs(out: &mut String ,stmt: &IRNode, libs: &mut Vec<String>) {
-        match stmt{
-            IRNode::If { cond: _, then_branch, else_branch } => {
-                for inner in then_branch {
-                    Self::collect_libs(out, inner, libs);
+
+    fn collect_libs(
+        stmt: &IRNode,
+        defined: &HashMap<String, (Vec<(String, Type)>, Type)>,
+        libs: &mut Vec<String>,         // preserves order for the final MASM file
+        extrns: &mut HashSet<String>,   // tracks *symbols* already declared
+    ) {
+        fn walk_expr(
+            e: &Expr,
+            defined: &HashMap<String, (Vec<(String, Type)>, Type)>,
+            libs: &mut Vec<String>,
+            extrns: &mut HashSet<String>,
+        ) {
+            match e {
+                Expr::Call { name, args } => {
+                    if !defined.contains_key(name) {
+                        // 1️⃣  make sure EXTRN appears once per symbol
+                        extrns.insert(name.clone());
+
+                        // 2️⃣  make sure the corresponding library line appears once
+                        let lib = lib_for(name);
+                        if !libs.contains(&lib.to_string()) {
+                            libs.push(lib.to_string());
+                        }
+                    }
+                    // recurse into arguments
+                    for a in args {
+                        walk_expr(a, defined, libs, extrns);
+                    }
                 }
-                if let Some(else_branch) = else_branch {
-                    for inner in else_branch {
-                        Self::collect_libs(out, inner, libs);
+
+                Expr::Unary  { expr, .. }        => walk_expr(expr, defined, libs, extrns),
+                Expr::Binary { left, right, .. } => {
+                    walk_expr(left,  defined, libs, extrns);
+                    walk_expr(right, defined, libs, extrns);
+                }
+                Expr::Literal(_) | Expr::Variable(_) => {}
+            }
+        }
+
+        match stmt {
+            // nodes that hold expressions
+            IRNode::Assign { value, .. } |
+            IRNode::Return(Some(value))  => walk_expr(value, defined, libs, extrns),
+
+            IRNode::Print { args }       => {
+                extrns.insert("printf".into());
+
+                let lib = lib_for("printf"); // usually "msvcrt.lib"
+                if !libs.contains(&lib.to_string()) {
+                    libs.push(lib.to_string());
+                }
+
+                for p in args {
+                    if let PrintArg::Expr(e) = p {
+                        walk_expr(e, defined, libs, extrns);
                     }
                 }
             }
-            IRNode::While { cond: _, body } => {
-                for inner_stmt in body {
-                    Self::collect_libs(out, inner_stmt, libs);
+
+            IRNode::Store { dst, value } => {
+                walk_expr(dst,   defined, libs, extrns);
+                walk_expr(value, defined, libs, extrns);
+            }
+
+            IRNode::Call { name, args }  => {
+                let dummy = Expr::Call { name: name.clone(), args: args.clone() };
+                walk_expr(&dummy, defined, libs, extrns);
+            }
+
+            // control-flow recursion
+            IRNode::If { cond, then_branch, else_branch } => {
+                walk_expr(cond, defined, libs, extrns);
+                for n in then_branch { Self::collect_libs(n, defined, libs, extrns); }
+                if let Some(eb) = else_branch {
+                    for n in eb { Self::collect_libs(n, defined, libs, extrns); }
                 }
             }
-            IRNode::Print {..} => {
-                if !libs.contains(&"msvcrt.lib".to_string()) {
-                    out.push_str("extrn printf:PROC\n");
-                    out.push_str("includelib lib\\msvcrt.lib\n\n");
-                    libs.push("msvcrt.lib".to_string());
-                }
+            IRNode::While { cond, body } => {
+                walk_expr(cond, defined, libs, extrns);
+                for n in body { Self::collect_libs(n, defined, libs, extrns); }
             }
-            _ => {}
+
+            // everything else has no external calls
+            IRNode::VarDecl(_)
+            | IRNode::Return(None)
+            | IRNode::Function { .. } => {}
         }
     }
 
@@ -1438,6 +1572,9 @@ impl IRTranslator {
             }
             Expr::Literal(_) | Expr::Variable(_) => {
                 // no literals to collect in these nodes
+            }
+            Expr::Unary { expr, .. } => {
+                Self::scan_expr(expr, pool);
             }
         }
     }
@@ -1533,6 +1670,7 @@ impl IRTranslator {
             Backend::JavaScript => todo!(),
             Backend::MASM => {
                 let mut libraries = Vec::new();
+                let mut externs = HashSet::new();
                 let mut out = String::new();
                 let mut lit_table: HashMap<String, String> = HashMap::new();
 
@@ -1544,12 +1682,26 @@ impl IRTranslator {
                 nodes.iter().for_each(|n| {
                     if let IRNode::Function { name: _, params: _, return_type: _, body} = n {
                         for stmt in body {
-                            Self::collect_libs(
-                                &mut out, stmt, &mut libraries
-                            )
+                            Self::collect_libs(stmt, functions, &mut libraries, &mut externs);
                         }
                     }
                 });
+
+                for s in &externs {
+                    out.push_str(&format!("extrn {s}:PROC\n"));
+                }
+
+                if !externs.is_empty() {
+                    out.push('\n');
+                }
+
+                // all includelib lines in first-seen order
+                for l in &libraries {
+                    out.push_str(&format!("includelib lib\\{l}\n"));
+                }
+                if !libraries.is_empty() {
+                    out.push('\n');
+                }
 
                 // collect variables
                 let mut var_decls = Vec::new();
