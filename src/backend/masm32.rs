@@ -721,6 +721,22 @@ pub fn masm_generator(
                 masm_generator(out, expr, var_decls, functions, lit_table);
                 out.push_str("    mov eax, dword ptr [eax]\n"); // dereference pointer
             }
+            Expr::Unary { op: Token::Ampersand, expr } => {
+                match &**expr {
+                    // &variable
+                    Expr::Variable(var_name) => {
+                        out.push_str(&format!("    lea eax, {}\n", var_name)); // load address of variable
+                    }
+                    // &*pointer
+                    Expr::Unary { op: Token::Star, expr: inner_expr } => {
+                        // &*expr
+                        masm_generator(out, inner_expr, var_decls, functions, lit_table);
+                    }
+                    _ => {
+                        panic!("Unsupported unary expression for address-of: {:?}", expr);
+                    }
+                }
+            }
             Expr::Call { name, args } => {
                 // Evaluate args right-to-left, push them on the stack
                 // We assume each argument fits in EAX after evaluating its expression.

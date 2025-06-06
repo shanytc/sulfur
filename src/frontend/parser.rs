@@ -625,12 +625,22 @@ impl Parser {
     }
 
     pub fn parse_factor(&mut self) -> Expr {
+        // todo: move star and ampersand to the match arm below
         // pointer dereference
         if self.cur_token == Token::Star {
             self.advance(); // consume '*'
             let inner = self.parse_factor();
             return Expr::Unary {
                 op: Token::Star,
+                expr: Box::new(inner),
+            };
+        }
+        
+        if self.cur_token == Token::Ampersand {
+            self.advance(); // consume '&'
+            let inner = self.parse_factor();
+            return Expr::Unary {
+                op: Token::Ampersand,
                 expr: Box::new(inner),
             };
         }

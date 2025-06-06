@@ -3,8 +3,8 @@
 > Work in Progress
 
 
- <p align="center">
-  <img src="https://github.com/user-attachments/assets/e692ddd1-7d1e-4f44-8a8e-e3fe3aa0dc94" />
+ <p>
+  <img alt="Sulfur" src="https://github.com/user-attachments/assets/e692ddd1-7d1e-4f44-8a8e-e3fe3aa0dc94" />
 </p>
 
 # Code Examples
@@ -102,7 +102,7 @@ Fizz
 1
 ```
 
-### Pointers
+### Pointers (and arrays)
 ```c
 fn main() {
     let a, idx = 0;
@@ -133,4 +133,18 @@ fn main() {
 7
 8
 9
+```
+
+### Dereferencing pointers
+```c
+fn main() {
+    let a;
+    let b = 10;
+    a = &b; // a is a reference to b
+    print("Value of a: %d\n", *a);
+}
+```
+
+```bash
+Value of a: 10
 ```

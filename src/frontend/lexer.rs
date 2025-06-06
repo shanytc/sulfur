@@ -114,7 +114,9 @@ impl Lexer {
                     self.next_char();
                     Token::AndAnd
                 } else {
-                    panic!("Unexpected character: {}", self.peek());
+                    // panic!("Unexpected character: {}", self.peek());
+                    // todo: add support for bitwise AND
+                    Token::Ampersand // for dereferencing
                 }
             }
             '|' => {

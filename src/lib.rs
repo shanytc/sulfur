@@ -11,6 +11,6 @@ use backend::{ir_translator::IRTranslator as IR, Backend};
 pub fn compile_to_masm(src: &str) -> (String, Vec<String>) {
     let lexer  = Lexer::new(src);
     let mut p  = Parser::new(lexer);
-    let ir     = p.parse_program();              // build IR
+    let ir     = p.parse_program(); // build IR
     IR::translate(&ir, &p.functions, Backend::MASM32)
 }

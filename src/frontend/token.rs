@@ -8,6 +8,7 @@ pub enum Token {
     Minus,          // -
     MinusAssign,    // -=
     Star,           // *
+    Ampersand,      // & // for dereferencing and bitwise AND
     StarAssign,     // *=
     Slash,          // /
     SlashAssign,    // /=
