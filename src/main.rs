@@ -16,39 +16,39 @@ pub enum Token {
     Slash,          // /
     SlashAssign,    // /=
     Percent,        // %
-    PercentAssign, // %=
-    LParen, RParen, LBrace, RBrace,
+    PercentAssign,  // %=
+    LParen, RParen, LBrace, RBrace, // (, ), {, }
     Comma,
-    Assign,     // '='
-    SemiColon,  // ';'
-    Less,          // <
-    LessEqual,     // <=
-    Greater,       // >
-    GreaterEqual,  // >=
-    EqualEqual,    // ==
-    BangEqual,     // !=
-    AndAnd,      // &&
-    OrOr,       // ||
-    Arrow,      // ->
+    Assign,         // '='
+    SemiColon,      // ';'
+    Less,           // <
+    LessEqual,      // <=
+    Greater,        // >
+    GreaterEqual,   // >=
+    EqualEqual,     // ==
+    BangEqual,      // !=
+    AndAnd,         // &&
+    OrOr,           // ||
+    Arrow,          // ->
     EOF,
 }
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Literal(Literal),          //  5 or  3.14 or "abc"
-    Variable(String),          //  x
-    Binary {                   //  x + 4 or 7 + y or a + b
+    Literal(Literal),           //  5 or 3.14 or "abc"
+    Variable(String),           //  x
+    Binary {                    //  x + 4 or 7 + y or a + b
         left: Box<Expr>,
-        op: Token,            // Token::Plus, Token::Minus, etc.
+        op: Token,              // Token::Plus, Token::Minus, etc.
         right: Box<Expr>,
     },
     Unary {
-        op: Token,            // Token::Star (pointers)
-        expr: Box<Expr>,      // the expression to apply the unary operator to
+        op: Token,              // Token::Star (pointers)
+        expr: Box<Expr>,        // the expression to apply the unary operator to
     },
     Call {
-        name: String,         // function name
-        args: Vec<Expr>,      // arguments to the function
+        name: String,           // function name
+        args: Vec<Expr>,        // arguments to the function
     }
 }
 
@@ -1180,7 +1180,8 @@ impl IRTranslator {
                 out.push_str(&format!("    mov eax, {}\n",i));
             }
             Expr::Literal(Literal::String(s)) => {
-                let lbl = Self::intern_literal(lit_table, s);
+                let enc = Self::masm_encode_string(s);
+                let lbl = Self::intern_literal(lit_table, &enc);
                 out.push_str(&format!("    lea eax, {}\n", lbl));
             }
             Expr::Variable(name) => {
@@ -1610,7 +1611,8 @@ impl IRTranslator {
     fn scan_expr(expr: &Expr, pool: &mut HashMap<String, String>) {
         match expr {
             Expr::Literal(Literal::String(s)) => {
-                Self::intern_literal(pool, s);
+                let enc = Self::masm_encode_string(s);
+                Self::intern_literal(pool, &enc);
             }
             Expr::Binary { left, right, .. } => {
                 Self::scan_expr(left, pool);
