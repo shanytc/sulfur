@@ -11,14 +11,14 @@ mod masm32 {
     use std::fs::write;
     use sulfur_lang::compile_to_masm;
     use std::sync::Mutex;
-    
+
     static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
     // Re-export the masm32 function for tests
     pub fn masm32(src: &str) -> (String, Vec<String>) {
         compile_to_masm(src)
     }
-    
+
     fn execute_code(asm: String, libs: Vec<String>) -> std::io::Result<String> {
         let ml = r"C:\masm32\bin\ml.exe";
         let link = r"C:\masm32\bin\link.exe";
@@ -75,7 +75,7 @@ mod masm32 {
         // remove last \n
         Ok(out.trim_end().to_string())
     }
-    
+
     #[test]
     fn hello_world_generates_printf() {
         let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
@@ -205,5 +205,28 @@ mod masm32 {
         // check if printed value is correct
         let output = execute_code(asm, vec!["msvcrt.lib".to_string()]).expect("Execution failed");
         assert_eq!(output, "42", "Dereferencing failed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_masm32_placeholders() {
+        let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
+        let src = r#"
+        fn main() {
+            let a;
+            let b = 10;
+            a = &b; // a is a reference to b
+            print("{},{}\n", *a, b);
+        }
+    "#;
+
+        let (asm, libs) = masm32(src);
+
+        // check if printf is used correctly
+        assert!(asm.contains("extrn printf:PROC"), "printf extrn missing");
+
+        // execute the code and check output
+        let output = execute_code(asm, libs).expect("Execution failed");
+        assert_eq!(output, "10,10", "Placeholder printing failed");
     }
 }

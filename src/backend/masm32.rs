@@ -140,8 +140,6 @@ pub fn emit_stmt(
         // Handle Print statements
         IRNode::Print { args } => {
             let mut pushes = 0;
-            // declare literals
-            let mut fmt_builder = String::new();
 
             // push args in reverse order
             let original_fmt = args.first();
@@ -150,12 +148,14 @@ pub fn emit_stmt(
             } else {
                 args.iter().collect()
             };
+            
+            let mut specs: Vec<&'static str> = Vec::new();
 
             for param in args.iter().rev() {
                 match param {
                     PrintArg::Literal(Literal::Int(i)) => {
                         out.push_str(&format!("    push {}\n", i));
-                        fmt_builder.push_str("%d");
+                        specs.push("%d");
                         pushes += 1;
                     },
                     PrintArg::Literal(Literal::Float(f)) => {
@@ -163,31 +163,31 @@ pub fn emit_stmt(
                         out.push_str(&format!("    fld  qword ptr [{}]\n", lbl)); // …optional
                         out.push_str(&format!("    push dword ptr [{}+4]\n", lbl));
                         out.push_str(&format!("    push dword ptr [{}]\n",   lbl));
-                        fmt_builder.push_str("%f");
+                        specs.push("%f");
                         pushes += 2;
                     }
                     PrintArg::Literal(Literal::String(s)) => {
                         let lbl = intern_literal(lit_table, s);
                         out.push_str(&format!("    push offset {}\n", lbl));
-                        fmt_builder.push_str("%s");
+                        specs.push("%s");
                         pushes += 1;
                     },
                     PrintArg::Variable(name) => match var_decls.iter().find(|(n, _)| n == name) {
                         Some((_, Literal::Int(_))) => {
                             out.push_str(&format!("    push dword ptr [{}]\n", name));
-                            fmt_builder.push_str("%d");
+                            specs.push("%d");
                             pushes += 1;
                         },
                         Some((_, Literal::Float(_))) => {
                             out.push_str(&format!("    push dword ptr [{}+4]\n", name));
                             out.push_str(&format!("    push dword ptr [{}]\n", name));
-                            fmt_builder.push_str("%f");
+                            specs.push("%f");
                             pushes += 2;
                         },
                         Some((_, Literal::String(_))) => {
                             out.push_str(&format!("    lea eax, {}\n", name));
                             out.push_str("    push eax\n");
-                            fmt_builder.push_str("%s");
+                            specs.push("%s");
                             pushes += 1;
                         },
                         _  => {
@@ -197,35 +197,49 @@ pub fn emit_stmt(
                     PrintArg::Expr(e) => {
                         masm_generator(out, e, var_decls, functions, lit_table);
                         out.push_str("    push eax\n");
-                        fmt_builder.push_str("%d");
+                        specs.push("%d");
                         pushes += 1;
                     },
                 }
             }
+            
+            specs.reverse();
 
-            let (_, enc_fmt) = match original_fmt {
-                // user gave a literal → raw is *exactly* that string
-                Some(PrintArg::Literal(Literal::String(s))) => {
-                    let enc = masm_encode_string(s);  // encode once
-                    (s.clone(), enc)
+            let raw_fmt = if let Some(PrintArg::Literal(Literal::String(tmpl))) = original_fmt {
+                // -------- template *was* supplied by the user --------
+                let brace_cnt = tmpl.matches("{}").count();
+
+                if brace_cnt > 0 {
+                    // template contains {} placeholders – use fill_placeholders
+                    if brace_cnt != specs.len() {
+                        panic!("{} placeholders but {} argument(s) given",
+                               brace_cnt, specs.len());
+                    }
+                    with_trailing_nl(fill_placeholders(tmpl, &specs))
+                } else if specs.is_empty() || tmpl.contains('%') {
+                    // no {}  AND  (no extra args  OR  user already has %d/%s/%f)
+                    with_trailing_nl(tmpl.clone())
+                } else {
+                    // plain text + extra args → append auto spec list
+                    let mut s = tmpl.clone();
+                    for sp in &specs { s.push_str(sp); }
+                    with_trailing_nl(s)
                 }
-
-                // no literal → we built an automatic "%d%f..." in fmt_text;
-                // it still needs encoding for MASM.
-                Some(_) => {
-                    let raw = format!("{fmt_builder}\\n");
-                    let enc = masm_encode_string(&raw);
-                    (raw, enc)
+            } else {
+                // -------- NO template string – build one automatically --------
+                if specs.is_empty() {
+                    // `print()` called with a single plain literal (rare but possible)
+                    with_trailing_nl("%d".to_string())
+                } else {
+                    let mut auto = String::new();
+                    for sp in &specs { auto.push_str(sp); }
+                    with_trailing_nl(auto)
                 }
-
-                None => panic!("print() called with no arguments"),
             };
-
-            // Re-use existing literal label if present
-            let fmt_lbl = intern_literal(lit_table, &enc_fmt);
+            let enc     = masm_encode_string(&raw_fmt);
+            let fmt_lbl = intern_literal(lit_table, &enc);
             out.push_str(&format!("    push offset {fmt_lbl}\n"));
             pushes += 1;
-
             out.push_str("    call printf\n");
             out.push_str(&format!("    add esp, {}\n", pushes * 4));
         }
@@ -398,23 +412,45 @@ fn intern_literal(pool: &mut HashMap<String, String>, s: &str) -> String {
 fn collect_literals(stmt: &IRNode, pool: &mut HashMap<String, String>) {
     match stmt {
         IRNode::Print { args} => {
-            if let Some(PrintArg::Literal(Literal::String(s))) = args.first() {
-                let var = masm_encode_string(s.clone().as_str());
-                intern_literal(pool, &var); // add to the pool → lit1, lit2, …
-            } else {
-                let mut fmt = String::new();
+            let Some(PrintArg::Literal(Literal::String(tmpl))) = args.first() else {
+                // “auto-format” case (user did not give a template string)
+                let mut auto_specs = String::new();
                 for p in args {
                     match p {
-                        PrintArg::Literal(Literal::Float(_))          => fmt.push_str("%f"),
-                        PrintArg::Literal(Literal::String(_))         => fmt.push_str("%s"),
-                        // Int literals, variables and expressions all use %d
-                        _                                             => fmt.push_str("%d"),
+                        PrintArg::Literal(Literal::Float(_))          => auto_specs.push_str("%f"),
+                        PrintArg::Literal(Literal::String(_))         => auto_specs.push_str("%s"),
+                        _                                             => auto_specs.push_str("%d"),
                     }
                 }
-                fmt.push_str("\\n");          // trailing CR/LF just like emit_stmt
-                let enc = masm_encode_string(&fmt);
-                intern_literal(pool, &enc); // add to the pool → lit1, lit2, …
+                let raw  = with_trailing_nl(auto_specs);
+                let enc  = masm_encode_string(&raw);
+                intern_literal(pool, &enc);
+                return;
+            };
+
+            let mut specs = Vec::new();
+            for p in args.iter().skip(1) {
+                specs.push(match p {
+                    PrintArg::Literal(Literal::Float(_))          => "%f",
+                    PrintArg::Literal(Literal::String(_))         => "%s",
+                    _                                             => "%d",
+                });
             }
+
+            let brace_cnt = tmpl.matches("{}").count();
+            let raw = if brace_cnt > 0 {
+                with_trailing_nl(fill_placeholders(tmpl, &specs))
+            } else if specs.is_empty() || tmpl.contains('%') {
+                with_trailing_nl(tmpl.clone())
+            } else {
+                let mut s = tmpl.clone();
+                for sp in &specs { s.push_str(sp); }
+                with_trailing_nl(s)
+            };
+            // ------------------------------------------------------------------------
+
+            let enc = masm_encode_string(&raw);
+            intern_literal(pool, &enc);            // only ONE canonical entry
         }
         IRNode::Assign {value, ..} | IRNode::Return(Some(value)) => scan_expr(value, pool),
         IRNode::If { cond, then_branch, else_branch } => {
@@ -605,6 +641,41 @@ pub fn generate(
     }
     out.push_str("end main\n");
     (out, libraries)
+}
+
+fn fill_placeholders(tmpl: &str, specs: &[&str]) -> String {
+    let mut out   = String::new();
+    let mut it    = specs.iter();
+    let mut chars = tmpl.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '{' && chars.peek() == Some(&'}') {
+            chars.next();                       // skip the '}'
+            if let Some(s) = it.next() {
+                out.push_str(s);                // normal substitution
+            } else {
+                out.push_str("{}");             // too many `{}` → keep literally
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+
+    // any *left-over* specs → behave like the “no {}” case and append them
+    for s in it {
+        out.push_str(s);
+    }
+
+    if !out.ends_with("\\n") { out.push_str("\\n"); }
+    out
+}
+
+fn with_trailing_nl(mut s: String) -> String {
+    if !s.ends_with("\\n")
+    {
+        s.push_str("\\n");
+    }
+    s
 }
 
 pub fn masm_generator(

@@ -1,6 +1,3 @@
 fn main() {
-    let a;
-    let b = 10;
-    a = &b; // a is a reference to b
-    print("Value of a: %d\n", *a);
+    print("Hello, World!\n");
 }
