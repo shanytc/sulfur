@@ -7,15 +7,15 @@ pub enum Token {
     Identifier(String),
     StringLiteral(String),
     NumberLiteral(String),
-    Plus,          // +
-    PlusAssign,  // +=
-    Minus,         // -
-    MinusAssign, // -=
-    Star,          // *
-    StarAssign,  // *=
-    Slash,         // /
-    SlashAssign, // /=
-    Percent ,      // %
+    Plus,           // +
+    PlusAssign,     // +=
+    Minus,          // -
+    MinusAssign,    // -=
+    Star,           // *
+    StarAssign,     // *=
+    Slash,          // /
+    SlashAssign,    // /=
+    Percent,        // %
     PercentAssign, // %=
     LParen, RParen, LBrace, RBrace,
     Comma,
@@ -610,7 +610,6 @@ impl Parser {
                     }
 
                     // variable assignment
-                    let base_name = id.clone();
                     let var_name = self.scoped(id.clone().as_str()); // append _var to the variable name
                     if !self.constants.contains_key(&var_name) {
                         panic!("Variable '{}' hasn't been declared!", var_name);
@@ -623,7 +622,7 @@ impl Parser {
                         Token::PlusAssign => {
                             self.advance(); // consume the '+='
                             let expr = self.parse_logic();
-                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let lhs_expr = Expr::Variable(var_name.clone()); // append _var to the variable name
                             let new_value = Expr::Binary {
                                 left: Box::new(lhs_expr),
                                 op: Token::Plus,
@@ -640,7 +639,7 @@ impl Parser {
                         Token::MinusAssign => {
                             self.advance(); // consume the '-='
                             let expr = self.parse_logic();
-                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let lhs_expr = Expr::Variable(var_name.clone()); // append _var to the variable name
                             let new_value = Expr::Binary {
                                 left: Box::new(lhs_expr),
                                 op: Token::Minus,
@@ -657,7 +656,7 @@ impl Parser {
                         Token::StarAssign => {
                             self.advance(); // consume the '*='
                             let expr = self.parse_logic();
-                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let lhs_expr = Expr::Variable(var_name.clone()); // append _var to the variable name
                             let new_value = Expr::Binary {
                                 left: Box::new(lhs_expr),
                                 op: Token::Star,
@@ -674,7 +673,7 @@ impl Parser {
                         Token::SlashAssign => {
                             self.advance(); // consume the '/='
                             let expr = self.parse_logic();
-                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let lhs_expr = Expr::Variable(var_name.clone()); // append _var to the variable name
                             let new_value = Expr::Binary {
                                 left: Box::new(lhs_expr),
                                 op: Token::Slash,
@@ -691,7 +690,7 @@ impl Parser {
                         Token::PercentAssign => {
                             self.advance(); // consume the '%='
                             let expr = self.parse_logic();
-                            let lhs_expr = Expr::Variable(base_name); // append _var to the variable name
+                            let lhs_expr = Expr::Variable(var_name.clone()); // append _var to the variable name
                             let new_value = Expr::Binary {
                                 left: Box::new(lhs_expr),
                                 op: Token::Percent,
@@ -1088,21 +1087,26 @@ impl Parser {
         loop {
             // must be string literal
             if first {
-                if let Token::StringLiteral(s) = &self.cur_token {
-                    args.push(PrintArg::Literal(Literal::String(s.clone())));
-                    self.advance(); // consume the string literal
-                    first = false;
-                }else if let Token::Identifier(id) = &self.cur_token {
-                    // if the first argument is an identifier, it must be a variable
-                    let var_name = self.scoped(id.clone().as_str()); // append _var to the variable name
-                    if self.constants.contains_key(&var_name) {
-                        args.push(PrintArg::Variable(var_name));
-                    } else {
-                        panic!("Variable '{}' is not declared!", var_name);
+                match &self.cur_token {
+                    Token::StringLiteral(s) => {
+                        args.push(PrintArg::Literal(Literal::String(s.clone())));
+                        self.advance(); // consume the string literal
                     }
-                } else {
-                    panic!("Expected string literal as first argument to print, found: {:?}", self.cur_token);
+                    Token::Identifier(id) if {
+                        let v = self.scoped(id);
+                        self.constants.contains_key(&v)
+                    } => {
+                        let var_name = self.scoped(id); // append _var to the variable name
+                        args.push(PrintArg::Variable(var_name.clone()));
+                        self.advance(); // consume the identifier
+                    }
+                    _ => {
+                        let expr = self.parse_logic();
+                        args.push(PrintArg::Expr(expr));
+                    }
                 }
+
+                first = false;
             } else {
                 // any other ordinary expression
                 let expr = self.parse_logic();
@@ -1487,7 +1491,7 @@ impl IRTranslator {
                 } else {
                     Self::masm_generator(out, dst, var_decls, functions, lit_table);
                 }
-                
+
                 out.push_str("    mov dword ptr [eax], edx\n"); // store value in address
             }
             IRNode::Call { name, args } => {
