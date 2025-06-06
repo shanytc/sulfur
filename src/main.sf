@@ -1,3 +1,7 @@
 fn main() {
-    print("Hello, World!\n");
+    let a, b;
+    a = 5;
+    b = 10;
+    let c = a & b;
+    print("The result of a & b is: {}", c);
 }

@@ -114,8 +114,6 @@ impl Lexer {
                     self.next_char();
                     Token::AndAnd
                 } else {
-                    // panic!("Unexpected character: {}", self.peek());
-                    // todo: add support for bitwise AND
                     Token::Ampersand // for dereferencing
                 }
             }
@@ -123,9 +121,9 @@ impl Lexer {
                 self.next_char();
                 if self.peek() == '|' {
                     self.next_char();
-                    Token::OrOr
+                    Token::OrOr // for logical OR
                 } else {
-                    panic!("Unexpected character: {}", self.peek());
+                    Token::Pipe // for bitwise OR
                 }
             }
             '"' => {

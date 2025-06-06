@@ -206,7 +206,6 @@ pub fn emit_stmt(
             specs.reverse();
 
             let raw_fmt = if let Some(PrintArg::Literal(Literal::String(tmpl))) = original_fmt {
-                // -------- template *was* supplied by the user --------
                 let brace_cnt = tmpl.matches("{}").count();
 
                 if brace_cnt > 0 {
@@ -216,8 +215,22 @@ pub fn emit_stmt(
                                brace_cnt, specs.len());
                     }
                     with_trailing_nl(fill_placeholders(tmpl, &specs))
-                } else if specs.is_empty() || tmpl.contains('%') {
-                    // no {}  AND  (no extra args  OR  user already has %d/%s/%f)
+                } else if tmpl.contains('%') {
+                    let mut count_placeholders = 0;
+                    count_placeholders += tmpl.matches("%d").count();
+                    count_placeholders += tmpl.matches("%f").count();
+                    count_placeholders += tmpl.matches("%s").count();
+                    
+                    if count_placeholders != specs.len() {
+                        panic!(
+                            "{} '%-style' specifier(s) but {} argument(s) given",
+                            count_placeholders,
+                            specs.len()
+                        );
+                    }
+                    
+                    with_trailing_nl(tmpl.clone())
+                } else if specs.is_empty() {
                     with_trailing_nl(tmpl.clone())
                 } else {
                     // plain text + extra args → append auto spec list
@@ -770,6 +783,14 @@ pub fn masm_generator(
                         out.push_str("    setne al\n");       // al  = (right != 0)
                         out.push_str("    or al, bl\n");      // al = al | bl
                         out.push_str("    movzx eax, al\n");  // zero-extend to eax
+                    }
+                    Token::Ampersand => {
+                        // eax = left & right
+                        out.push_str("    and eax, ebx\n"); // bitwise AND
+                    }
+                    Token::Pipe => {
+                        // eax = left | right
+                        out.push_str("    or eax, ebx\n"); // bitwise OR
                     }
                     _ => unreachable!("Unsupported operator generation: {:?}", op)
                 }

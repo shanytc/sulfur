@@ -9,6 +9,7 @@ pub enum Token {
     MinusAssign,    // -=
     Star,           // *
     Ampersand,      // & // for dereferencing and bitwise AND
+    Pipe,           // | // for bitwise OR
     StarAssign,     // *=
     Slash,          // /
     SlashAssign,    // /=

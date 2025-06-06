@@ -7,7 +7,7 @@
 
 mod masm32 {
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::fs::write;
     use sulfur_lang::compile_to_masm;
     use std::sync::Mutex;
@@ -41,9 +41,10 @@ mod masm32 {
 
         // assemble
         let ok = Command::new(ml)
-            .args(["/c", "/coff"])
+            .args(["/nologo", "/c", "/coff"])
             .arg(format!("/Fo{}", obj_path.display()))
             .arg(&asm_path)
+            .stdout(Stdio::null())  // ← throw away “Assembling: …” (stdout)
             .status()?
             .success();
         assert!(ok, "ML.EXE failed");
@@ -53,6 +54,7 @@ mod masm32 {
             .map(|l| format!(r"C:\masm32\lib\{l}"))
             .collect();
         let ok = Command::new(link)
+            .arg("/nologo")
             .arg(&obj_path)
             .args(&full_libs)
             .args(["/SUBSYSTEM:CONSOLE", "/ENTRY:main", "/NODEFAULTLIB"])
@@ -77,7 +79,7 @@ mod masm32 {
     }
 
     #[test]
-    fn hello_world_generates_printf() {
+    fn hello_world_generates_print() {
         let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
         let src = r#"
             fn main() {
@@ -95,19 +97,63 @@ mod masm32 {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn const_fold_addition() {
         let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
         let src = r#"
         fn main() {
             let a = 2 + 3;
-            print("%d\n", a);
+            let b = 5 - 2;
+            let c = a + b;
+            print("%d,%d,%d\n", a, b, c);
         }
     "#;
-        let (asm, _) = masm32(src);
+        let (asm, libs) = masm32(src);
         assert!(asm.contains("a_var dd 5"), "const-folding failed");
+        assert!(asm.contains("b_var dd 3"), "const-folding failed");
+        assert!(asm.contains("extrn printf:PROC"), "printf extrn missing");
+        let output = execute_code(asm, libs).expect("Execution failed");
+        assert_eq!(output, "5,3,8", "Output mismatch");
     }
 
+
+    #[cfg(windows)]
+    #[test]
+    fn test_masm32_multiplication() {
+        let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
+        let src = r#"
+            fn main() {
+                let a = 2 * 3;
+                let b = 4 * 5;
+                let c = a * b;
+                print("%d,%d,%d\n", a, b, c);
+            }
+        "#;
+        let (asm, libs) = masm32(src);
+        let output = execute_code(asm, libs).expect("Execution failed");
+        assert_eq!(output, "6,20,120", "Multiplication output mismatch");
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn test_masm32_division() {
+        let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
+        let src = r#"
+            fn main() {
+                let a = 20 / 4;
+                let b = 15 / 3;
+                let c = a / b;
+                print("%d,%d,%d\n", a, b, c);
+            }
+        "#;
+        let (asm, libs) = masm32(src);
+        let output = execute_code(asm, libs).expect("Execution failed");
+        assert_eq!(output, "5,5,1", "Division output mismatch");
+    }
+
+    #[cfg(windows)]
     #[test]
     fn while_loop_emits_two_labels() {
         let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
@@ -228,5 +274,48 @@ mod masm32 {
         // execute the code and check output
         let output = execute_code(asm, libs).expect("Execution failed");
         assert_eq!(output, "10,10", "Placeholder printing failed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_masm32_bitwise_and() {
+        let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
+        let src = r#"
+            fn main() {
+                let a = 5; // 0101 in binary
+                let b = 3; // 0011 in binary
+                let c = a & b; // Bitwise AND
+                print("%d\n", c); // Should print 1 (0001 in binary)
+            }
+       "#;
+        let (asm, libs) = masm32(src);
+
+        // check if printf is used correctly
+        assert!(asm.contains("extrn printf:PROC"), "printf extrn missing");
+
+        // execute the code and check output
+        let output = execute_code(asm, libs).expect("Execution failed");
+        assert_eq!(output, "1", "Bitwise AND operation failed");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn test_masm32_bitwise_or() {
+        let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
+        let src = r#"
+            fn main() {
+                let a = 5; // 0101 in binary
+                let b = 3; // 0011 in binary
+                let c = a | b; // Bitwise OR
+                print("%d\n", c); // Should print 7 (0111 in binary)
+            }
+       "#;
+        let (asm, libs) = masm32(src);
+
+        // check if printf is used correctly
+        assert!(asm.contains("extrn printf:PROC"), "printf extrn missing");
+
+        // execute the code and check output
+        let output = execute_code(asm, libs).expect("Execution failed");
+        assert_eq!(output, "7", "Bitwise OR operation failed");
     }
 }

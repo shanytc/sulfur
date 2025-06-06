@@ -164,14 +164,14 @@ impl Parser {
     }
 
     pub fn parse_logic(&mut self) -> Expr {
-        let mut expr = self.parse_comparison();
+        let mut expr = self.parse_bitwise();
 
         while matches!(
             self.cur_token, Token::AndAnd | Token::OrOr
         ){
             let op = self.cur_token.clone();
             self.advance();
-            let rhs = self.parse_comparison();
+            let rhs = self.parse_bitwise();
 
             expr = Expr::Binary {
                 left: Box::new(expr),
@@ -432,6 +432,30 @@ impl Parser {
                     _ => panic!("Cannot add strings in a constant expression"),
                 }
             }
+            
+            Expr::Binary { left, op: Token::Ampersand, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a), Literal::Int(b)) => Literal::Int(a & b),
+                    (Literal::Float(a), Literal::Float(b)) => Literal::Int((a as i64) & (b as i64)),
+                    (Literal::Int(a), Literal::Float(b)) => Literal::Int(a & (b as i64)),
+                    (Literal::Float(a), Literal::Int(b)) => Literal::Int((a as i64) & b),
+                    _ => panic!("Cannot evaluate bitwise AND on non-numeric constants"),
+                }
+            }
+            
+            Expr::Binary { left, op: Token::Pipe, right } => {
+                let l = self.const_eval(left);
+                let r = self.const_eval(right);
+                match (l, r) {
+                    (Literal::Int(a), Literal::Int(b)) => Literal::Int(a | b),
+                    (Literal::Float(a), Literal::Float(b)) => Literal::Int((a as i64) | (b as i64)),
+                    (Literal::Int(a), Literal::Float(b)) => Literal::Int(a | (b as i64)),
+                    (Literal::Float(a), Literal::Int(b)) => Literal::Int((a as i64) | b),
+                    _ => panic!("Cannot evaluate bitwise OR on non-numeric constants"),
+                }
+            }
 
             Expr::Binary { left, op: Token::Minus, right } => {
                 let l = self.const_eval(left);
@@ -622,6 +646,21 @@ impl Parser {
         let mut nodes = vec![IRNode::VarDecl(declarations)];
         nodes.extend(init_stmts);
         nodes
+    }
+    
+    pub fn parse_bitwise(&mut self) -> Expr {
+        let mut expr = self.parse_comparison();
+        while matches!(self.cur_token, Token::Ampersand | Token::Pipe) {
+            let op = self.cur_token.clone();
+            self.advance();
+            let rhs = self.parse_comparison();
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(rhs),
+            };
+        }
+        expr
     }
 
     pub fn parse_factor(&mut self) -> Expr {
