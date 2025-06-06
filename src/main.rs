@@ -990,7 +990,7 @@ impl Parser {
                         }
                     }
 
-                    if self. cur_token == Token::RParen {
+                    if self.cur_token == Token::RParen {
                         self.advance(); // consume ')'
                     } else {
                         panic!("Expected ')' after function arguments, found: {:?}", self.cur_token);
@@ -1005,6 +1005,14 @@ impl Parser {
                     self.advance(); // consume the identifier
                     Expr::Variable(var_name)
                 }
+            }
+            Token::LParen => {
+                self.advance();   // consume '('
+                let inner = self.parse_logic();    // full expression inside
+                assert_eq!(self.cur_token, Token::RParen,
+                           "Expected ')' to close expression");
+                self.advance();  // consume ')'
+                inner
             }
             _ => panic!("Expected a factor, found: {:?}", self.cur_token),
         }
@@ -1251,9 +1259,23 @@ impl IRTranslator {
                     _ => unreachable!("Unsupported operator generation: {:?}", op)
                 }
             }
-            Expr::Unary { op: _, expr } => {
+            Expr::Unary { op: Token::Star, expr } => {
+                // *(ptr +- idx)
+                if let Expr::Binary { left, op, right } = &**expr {
+                    if matches!(op, Token::Plus | Token::Minus) {
+                        Self::masm_generator(out, left, var_decls, functions, lit_table); // evaluate pointer base
+                        out.push_str("    push eax\n");
+                        Self::masm_generator(out, right, var_decls, functions, lit_table); // evaluate index
+                        out.push_str("    pop ebx\n"); // pop pointer base into EBX
+                        Self::gen_ptr_add(out, op); // calculate pointer address in EAX
+                        out.push_str("    mov eax, dword ptr [eax]\n"); // dereference pointer
+                        return;
+                    }
+                }
+
+                // fallback
                 Self::masm_generator(out, expr, var_decls, functions, lit_table);
-                out.push_str("    mov eax, dword ptr [eax]\n"); // load the value into EAX
+                out.push_str("    mov eax, dword ptr [eax]\n"); // dereference pointer
             }
             Expr::Call { name, args } => {
                 // Evaluate args right-to-left, push them on the stack
@@ -1280,6 +1302,18 @@ impl IRTranslator {
         let lbl = format!("label_{}", *counter);
         *counter += 1;
         lbl
+    }
+
+    fn gen_ptr_add(out: &mut String, op: &Token) {
+        out.push_str("    imul eax, 4\n");           // index *= 4   (sizeof i32)
+        match op {
+            Token::Plus  => out.push_str("    add eax, ebx\n"),
+            Token::Minus => {
+                out.push_str("    sub ebx, eax\n");
+                out.push_str("    mov eax, ebx\n");
+            }
+            _ => unreachable!(),
+        }
     }
 
     pub fn emit_stmt(
@@ -1435,13 +1469,26 @@ impl IRTranslator {
                 out.push_str(&format!("    add esp, {}\n", pushes * 4));
             }
             IRNode::Store { dst, value} => {
-                // evaluate rhs first into edx
+                // rhs => edx
                 Self::masm_generator(out, value, var_decls, functions, lit_table);
-                out.push_str("    mov edx, eax\n"); // move value to edx
+                out.push_str("    mov edx, eax\n"); // store value in edx
 
-                // evaluate address into eax
-                Self::masm_generator(out, dst, var_decls, functions, lit_table);
-                out.push_str("    mov dword ptr [eax], edx\n"); // store value in destination
+                // address => eax
+                if let Expr::Binary { left, op, right } = dst {
+                   if matches!(op, Token::Plus | Token::Minus) {
+                       Self::masm_generator(out, left, var_decls, functions, lit_table);
+                       out.push_str("    push eax\n"); // save pointer base
+                       Self::masm_generator(out, right, var_decls, functions, lit_table);
+                       out.push_str("    pop ebx\n"); // pop pointer base into EBX
+                       Self::gen_ptr_add(out, op); // calculate pointer address in EAX
+                   } else {
+                          Self::masm_generator(out, dst, var_decls, functions, lit_table);
+                   }
+                } else {
+                    Self::masm_generator(out, dst, var_decls, functions, lit_table);
+                }
+                
+                out.push_str("    mov dword ptr [eax], edx\n"); // store value in address
             }
             IRNode::Call { name, args } => {
                 // generate code for function call
