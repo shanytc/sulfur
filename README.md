@@ -101,3 +101,36 @@ Fizz
 2
 1
 ```
+
+### Pointers
+```c
+fn main() {
+    let a, idx = 0;
+    a = malloc(10 * 4); // Allocate memory for 10 integers
+    while (idx < 10) {
+        *(a + idx) = idx;
+        idx += 1; // Increment the index
+    }
+
+    idx = 0;
+    while (idx < 10) {
+        print(*(a + idx)); // Print the value at the current index
+        idx += 1; // Increment the index
+    }
+
+    free(a); // Free the allocated memory
+}
+```
+
+```bash
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+```
