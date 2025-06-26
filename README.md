@@ -2,9 +2,8 @@
 > [!Warning]
 > Work in Progress
 
-
- <p>
-  <img alt="Sulfur" src="https://github.com/user-attachments/assets/e692ddd1-7d1e-4f44-8a8e-e3fe3aa0dc94" />
+<p align="center">
+  <img alt="Sulfur" src="https://github.com/user-attachments/assets/4e7cfd9d-b0b7-4d3e-b99e-743672514e03" />
 </p>
 
 # Code Examples
