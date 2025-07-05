@@ -261,11 +261,37 @@ impl Parser {
                 Token::Identifier(id) if id == "while" => stmts.push(self.parse_while()),
                 Token::Identifier(id) if id == "if" => stmts.push(self.parse_if()),
                 Token::Identifier(id) if id == "return" => stmts.push(self.parse_return()),
+                
+                // consume identifier followed by '['
+                Token::Identifier(id) if self.lexer.input.get(self.lexer.pos) == Some(&'[') => {
+                    let base_name = id.clone();
+                    self.advance(); // consume the identifier
+                    self.advance(); // consume the '['
+                    
+                    let idx_expr = self.parse_logic(); // parse the index expression
+                    assert_eq!(self.cur_token, Token::RBracket, "Expected ']' after index expression");
+                    self.advance(); // consume the ']'
+                    assert_eq!(self.cur_token, Token::Assign, "Expected '=' after a [index]");
+                    self.advance(); // consume the '='
+                    
+                    let rhs = self.parse_logic(); // parse the right-hand side expression
+                    if self.cur_token == Token::SemiColon { self.advance(); } // consume the semicolon
+                   
+                    let dst = Expr::Binary {
+                        left: Box::new(Expr::Variable(self.scoped(base_name.as_str()))), // append _var to the variable name
+                        op: Token::Plus,
+                        right: Box::new(idx_expr),
+                    };
+                    
+                    stmts.push(IRNode::Store { dst, value: rhs });
+                }
+                
                 // consume identifier = value
                 Token::Identifier(id) => {
                     // check for function call
                     if let Token::Identifier(func_name) = &self.cur_token {
                         let name = func_name.clone();
+                        // check if the next token is a '('
                         if self.lexer.input.get(self.lexer.pos).cloned() == Some('(') {
                             // function call used as a statement
                             let call_expr = self.parse_expression(); // consume function's args
@@ -663,28 +689,28 @@ impl Parser {
         expr
     }
 
+    /// Parse one “factor”:
+    ///     * primary  (literal / ident / call / (…) )
+    ///     * any leading unary * & operators
+    ///     * zero or more “[index]” postfixes
     pub fn parse_factor(&mut self) -> Expr {
-        // todo: move star and ampersand to the match arm below
-        // pointer dereference
-        if self.cur_token == Token::Star {
-            self.advance(); // consume '*'
-            let inner = self.parse_factor();
-            return Expr::Unary {
-                op: Token::Star,
-                expr: Box::new(inner),
-            };
-        }
-        
-        if self.cur_token == Token::Ampersand {
-            self.advance(); // consume '&'
-            let inner = self.parse_factor();
-            return Expr::Unary {
-                op: Token::Ampersand,
-                expr: Box::new(inner),
-            };
-        }
-
-        match &self.cur_token {
+        let mut expr = match &self.cur_token {
+            Token::Ampersand => {
+                self.advance(); // consume '&'
+                let inner = self.parse_factor();
+                Expr::Unary {
+                    op: Token::Ampersand,
+                    expr: Box::new(inner),
+                }
+            }
+            Token::Star => {
+                self.advance(); // consume '*'
+                let inner = self.parse_factor();
+                Expr::Unary {
+                    op: Token::Star,
+                    expr: Box::new(inner),
+                }
+            }
             Token::NumberLiteral(_) | Token::StringLiteral(_) => {
                 let lit = Self::parse_literal(&self.cur_token);
                 self.advance(); // consume the literal
@@ -736,7 +762,26 @@ impl Parser {
                 inner
             }
             _ => panic!("Expected a factor, found: {:?}", self.cur_token),
+        };
+
+        /* ---------- zero or more postfix  “[index]” ---------- */
+        while self.cur_token == Token::LBracket {
+            self.advance();
+            let idx = self.parse_logic(); // parse the index expression
+            assert_eq!(self.cur_token, Token::RBracket, "Expected ']' to close index expression");
+            self.advance(); // consume ']'
+
+            expr = Expr::Unary {
+                op: Token::Star,
+                expr: Box::new(Expr::Binary {
+                    left: Box::new(expr),
+                    op: Token::Plus,
+                    right: Box::new(idx),
+                }),
+            };
         }
+
+        expr
     }
 
     pub fn parse_term(&mut self) -> Expr {

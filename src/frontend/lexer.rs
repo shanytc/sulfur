@@ -55,6 +55,8 @@ impl Lexer {
         match self.peek() {
             '(' => { self.next_char(); Token::LParen }
             ')' => { self.next_char(); Token::RParen }
+            '[' => { self.next_char(); Token::LBracket }
+            ']' => { self.next_char(); Token::RBracket }
             '{' => { self.next_char(); Token::LBrace }
             '}' => { self.next_char(); Token::RBrace }
             ';' => { self.next_char(); Token::SemiColon }

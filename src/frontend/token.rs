@@ -16,6 +16,7 @@ pub enum Token {
     Percent,        // %
     PercentAssign,  // %=
     LParen, RParen, LBrace, RBrace, // (, ), {, }
+    LBracket, RBracket, // [, ]
     Comma,
     Assign,         // '='
     SemiColon,      // ';'
