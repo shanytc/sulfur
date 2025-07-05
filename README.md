@@ -147,3 +147,27 @@ fn main() {
 ```bash
 Value of a: 10
 ```
+
+### Pointer Indexing
+```c
+fn main() {
+    let a, b;
+    a = malloc(4 * 4);
+    a[0] = 10;
+    a[1] = 20;
+    a[2] = 30;
+    a[3] = 40;
+    let i = 0;
+    while (i < 4) {
+        print("{}", a[i]);
+        i+=1;
+    }
+}
+```
+
+```bash
+10
+20
+30
+40
+```
