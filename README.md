@@ -247,11 +247,11 @@ fn main() {
     p   = &buf;              //  p : **int
     (*p)[1] = 17;            // deref once, index into the array
     q = &(*p)[1];            // q : *int  → address of that element
-    print("{}", *q);         // → 17
+    print("Value is: {}", *q);         // → 17
 }
 ```
 ```bash
-error
+Value is: 17
 ```
 
 ### Iterating over an array with a pointer variable
@@ -270,13 +270,11 @@ fn main() {
         i = i + 1;
     }
 }
-/* output:
+```
+```bash
 10
 20
 30
 40
-*/
-```
-```bash
-error
+
 ```

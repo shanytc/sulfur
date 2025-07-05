@@ -14,7 +14,7 @@ fn main() {
     println!("{:?}", ir);
     println!("----------------------------------------");
 
-    let (masm, libs) = IR::translate(&ir, &parser.functions, Backend::MASM32);
+    let (masm, libs) = IR::translate(&ir, &parser.functions, &parser.ptr_vars, Backend::MASM32);
 
     let masm32 = "c:\\masm32\\bin\\ml.exe";
     let masm32linker = "c:\\masm32\\bin\\link.exe";

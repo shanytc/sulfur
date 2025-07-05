@@ -1,8 +1,14 @@
+fn make_array(n) -> int {     // returns a raw int (pointer value)
+    let p;
+    p = malloc(n * 4);        // n × i32
+    return p;                 // implicit & not needed
+}
+
 fn main() {
-    let buf, p, q;
-    buf = malloc(2 * 4);     // buf : *int
-    p   = &buf;              //  p : **int
-    (*p)[1] = 17;            // deref once, index into the array
-    q = &(*p)[1];            // q : *int  → address of that element
-    print("{}", *q);         // → 17
+    let nums;
+    nums = make_array(3);     // pointer comes back in EAX
+    nums[0] = 5;
+    nums[1] = 8;
+    nums[2] = 13;
+    print("Value is: {}", nums[1]);     // → 8
 }

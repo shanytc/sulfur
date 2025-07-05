@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::shared::VAR_NAME_EXTENSION;
 use super::{
     token::Token,
@@ -14,12 +14,13 @@ pub struct Parser {
     constants: HashMap<String, Literal>,
     pub functions: HashMap<String, (Vec<(String, Type)>, Type)>, // function name -> (params, return type)
     current_func: Option<String>, // the current function being parsed
+    pub ptr_vars: HashSet<String>,
 }
 
 impl Parser {
     pub fn new(mut lexer: Lexer) -> Self {
         let cur_token = lexer.next_token();
-        Parser { lexer, cur_token, constants: HashMap::new(), functions: HashMap::new(), current_func: None }
+        Parser { lexer, cur_token, constants: HashMap::new(), functions: HashMap::new(), current_func: None, ptr_vars: HashSet::new() }
     }
 
     fn advance(&mut self) {
@@ -31,6 +32,10 @@ impl Parser {
             Some(ref func_name) => format!("{}_{}{}", func_name, base, VAR_NAME_EXTENSION),
             None => format!("{}{}", base, VAR_NAME_EXTENSION), // no function context, just append _var
         }
+    }
+
+    fn mark_pointer(&mut self, name: &str) {
+        self.ptr_vars.insert(name.to_string());
     }
 
     pub fn parse_program(&mut self) -> Vec<IRNode> {
@@ -72,7 +77,7 @@ impl Parser {
             if self.cur_token != Token::RParen {
                // parse params
                 loop {
-                    // check for & or * before the identifier
+                    // check for '&', or '*' before the identifier
                     while self.cur_token == Token::Ampersand || self.cur_token == Token::Star {
                         self.advance(); // skip every symbol
                     }
@@ -429,45 +434,46 @@ impl Parser {
                     }
                 }
                 Token::Star => {
-                    self.advance();   // leading '*'
+                    self.advance();                              // consume the leading '*'
 
-                    /* base address expression  */
-                    let mut addr_expr = self.parse_factor();    // pp   or  (*pp)
+                    // first (required) dereference
+                    // Parse the expression after '*', then wrap it in a single Unary Star.
+                    // *p        =>  UnaryStar(p)
+                    // *(p + 1)  =>  UnaryStar(Binary(p,+,1))
+                    let mut addr_expr = Expr::Unary {
+                        op:   Token::Star,
+                        expr: Box::new(self.parse_factor()),
+                    };
 
-                    /* skip any wrapping ')' or ']' that belong to the l-value */
-                    while matches!(self.cur_token, Token::RParen | Token::RBracket) {
-                        self.advance();                         // eat ')', ']'
+                    // skip any CLosing parens from things like (*pp)
+                    while self.cur_token == Token::RParen {
+                        self.advance();
                     }
 
-                    /*  swallow one or more “[index]” postfixes that appear *after* the wrapping parens, e.g.  (*pp)[0][i]            */
+                    // handle one or more “[index]” postfixes
+                    // Each “[idx]” turns addr into addr + idx
                     while self.cur_token == Token::LBracket {
-                        self.advance();                         // eat '['
-                        let idx = self.parse_logic();           // parse index
-                        assert_eq!(self.cur_token, Token::RBracket,
-                                   "Expected ']' after index");
-                        self.advance();                         // eat ']'
+                        self.advance();                           // eat '['
+                        let idx = self.parse_logic();             // parse index
+                        assert_eq!(self.cur_token, Token::RBracket, "Expected ']' after index");
+                        self.advance();                           // eat ']'
 
-                        /* desugar   addr_expr[idx]   →   *(addr_expr + idx) */
-                        addr_expr = Expr::Unary {
-                            op: Token::Star,
-                            expr: Box::new(Expr::Binary {
-                                left:  Box::new(addr_expr),
-                                op:    Token::Plus,
-                                right: Box::new(idx),
-                            }),
+                        addr_expr = Expr::Binary {                // addr = addr + idx
+                            left:  Box::new(addr_expr),
+                            op:    Token::Plus,
+                            right: Box::new(idx),
                         };
                     }
 
-                    /* expect ‘=’ */
-                    assert_eq!(self.cur_token, Token::Assign,
-                               "Expected '=' after pointer destination");
-                    self.advance();                             // eat '='
+                    // expect the ‘=’
+                    assert_eq!(self.cur_token, Token::Assign, "Expected '=' after pointer destination");
+                    self.advance();                               // eat '='
 
-                    /* right-hand side */
+                    // right-hand side
                     let rhs = self.parse_logic();
                     if self.cur_token == Token::SemiColon { self.advance(); }
 
-                    /* emit IR */
+                    // emit IR
                     stmts.push(IRNode::Store { dst: addr_expr, value: rhs });
                 }
                 _ => {
@@ -685,6 +691,14 @@ impl Parser {
                 self.advance(); // consume the '='
                 let expr = self.parse_logic(); // parse the rhs expression
 
+                /* if the RHS is malloc(...) or &expr, we know the var is a pointer */
+                if let Expr::Call { name: call_name, .. } = &expr {
+                    if call_name == "malloc" { self.mark_pointer(&name); }
+                }
+                if matches!(expr, Expr::Unary { op: Token::Ampersand, .. }) {
+                    self.mark_pointer(&name);
+                }
+
                 if Self::is_const_expr(&expr) {
                     // compile time constant expression
                     let lit = self.const_eval(&expr);
@@ -732,7 +746,7 @@ impl Parser {
     }
 
     /// Parse one “factor”:
-    ///     * primary  (literal / ident / call / (…) )
+    ///     * primary (literal / ident / call / (...))
     ///     * any leading unary * & operators
     ///     * zero or more “[index]” postfixes
     pub fn parse_factor(&mut self) -> Expr {
@@ -888,6 +902,18 @@ impl Parser {
         assert_eq!(self.cur_token, Token::Assign, "Expected assignment operator '='");
         self.advance(); // consume '='
         let value = self.parse_logic();
+        if let Expr::Call { name: call_name, .. } = &value {
+            if call_name == "malloc" { self.mark_pointer(&name); }
+        }
+        if matches!(value, Expr::Unary { op: Token::Ampersand, .. }) {
+            self.mark_pointer(&name);
+        }
+        // ptr = other_ptr ➜ ptr becomes a pointer too
+        if let Expr::Variable(src) = &value {
+            if self.ptr_vars.contains(src) {
+                self.mark_pointer(&name);
+            }
+        }
         if self.cur_token == Token::SemiColon { self.advance(); }
         IRNode::Assign { name, value }
     }

@@ -12,5 +12,5 @@ pub fn compile_to_masm(src: &str) -> (String, Vec<String>) {
     let lexer  = Lexer::new(src);
     let mut p  = Parser::new(lexer);
     let ir     = p.parse_program(); // build IR
-    IR::translate(&ir, &p.functions, Backend::MASM32)
+    IR::translate(&ir, &p.functions, &p.ptr_vars, Backend::MASM32)
 }

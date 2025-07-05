@@ -32,7 +32,7 @@ fn masm_encode_string(src: &str) -> String {
     let mut seg   = String::new();
     let mut chars = src.chars().peekable();
 
-    // helper to flush current text segment (if not empty)
+    // helper to flush the current text segment (if not empty)
     let flush = |seg: &mut String, parts: &mut Vec<String>| {
         if !seg.is_empty() {
             parts.push(format!("\"{}\"", seg.replace('"', "\"\"")));
@@ -66,7 +66,7 @@ pub fn gen_label(counter: &mut usize) -> String {
 }
 
 pub fn gen_ptr_add(out: &mut String, op: &Token) {
-    out.push_str("    imul eax, 4\n");           // index *= 4   (sizeof i32)
+    out.push_str("    imul eax, 4\n"); // index *= 4 (sizeof i32)
     match op {
         Token::Plus  => out.push_str("    add eax, ebx\n"),
         Token::Minus => {
@@ -85,6 +85,7 @@ pub fn emit_stmt(
     tail: &String,
     functions: &HashMap<String, (Vec<(String, Type)>, Type)>,
     lit_table: &mut HashMap<String, String>,
+    ptr_vars: &HashSet<String>,
 ) {
     match stmt {
         IRNode::If {cond, then_branch, else_branch} => {
@@ -92,13 +93,13 @@ pub fn emit_stmt(
             let end_label = gen_label(lbl_counter);
 
             // Evaluate condition
-            masm_generator(out, cond, var_decls, functions, lit_table);
+            masm_generator(out, cond, var_decls, functions, lit_table, ptr_vars);
             out.push_str("    cmp eax, 0\n");
             out.push_str(&format!("    je {}\n", else_label));
 
             // Then branch
             for inner in then_branch {
-                emit_stmt(out, inner, var_decls, lbl_counter, tail, functions, lit_table);
+                emit_stmt(out, inner, var_decls, lbl_counter, tail, functions, lit_table, ptr_vars);
             }
             out.push_str(&format!("    jmp {}\n", end_label));
 
@@ -106,7 +107,7 @@ pub fn emit_stmt(
             out.push_str(&format!("{}:\n", else_label));
             if let Some(else_branch) = else_branch {
                 for inner in else_branch {
-                    emit_stmt(out, inner, var_decls, lbl_counter, tail, functions, lit_table);
+                    emit_stmt(out, inner, var_decls, lbl_counter, tail, functions, lit_table, ptr_vars);
                 }
             }
             out.push_str(&format!("{}:\n", end_label));
@@ -118,12 +119,12 @@ pub fn emit_stmt(
             let exit_label = gen_label(lbl_counter);
 
             out.push_str(&format!("{}:\n", start_label));
-            masm_generator(out, cond, var_decls, functions, lit_table);
+            masm_generator(out, cond, var_decls, functions, lit_table, ptr_vars);
             out.push_str("    cmp eax, 0\n");
             out.push_str(&format!("    je {}\n", exit_label));
 
             for inner in body {
-                emit_stmt(out, inner, var_decls, lbl_counter, &body_end_label, functions, lit_table);
+                emit_stmt(out, inner, var_decls, lbl_counter, &body_end_label, functions, lit_table, ptr_vars);
             }
 
             out.push_str(&format!("{}:\n", body_end_label));
@@ -133,7 +134,7 @@ pub fn emit_stmt(
 
         IRNode::Assign { name, value } => {
             // let's add labels
-            masm_generator(out, value, var_decls, functions, lit_table);
+            masm_generator(out, value, var_decls, functions, lit_table, ptr_vars);
             out.push_str(&format!("    mov dword ptr [{}], eax\n", name));
         }
 
@@ -195,7 +196,7 @@ pub fn emit_stmt(
                         }
                     },
                     PrintArg::Expr(e) => {
-                        masm_generator(out, e, var_decls, functions, lit_table);
+                        masm_generator(out, e, var_decls, functions, lit_table, ptr_vars);
                         out.push_str("    push eax\n");
                         specs.push("%d");
                         pushes += 1;
@@ -258,22 +259,22 @@ pub fn emit_stmt(
         }
         IRNode::Store { dst, value} => {
             // rhs => edx
-            masm_generator(out, value, var_decls, functions, lit_table);
+            masm_generator(out, value, var_decls, functions, lit_table, ptr_vars);
             out.push_str("    mov edx, eax\n"); // store value in edx
 
             // address => eax
             if let Expr::Binary { left, op, right } = dst {
                 if matches!(op, Token::Plus | Token::Minus) {
-                    masm_generator(out, left, var_decls, functions, lit_table);
+                    masm_generator(out, left, var_decls, functions, lit_table, ptr_vars);
                     out.push_str("    push eax\n"); // save pointer base
-                    masm_generator(out, right, var_decls, functions, lit_table);
+                    masm_generator(out, right, var_decls, functions, lit_table, ptr_vars);
                     out.push_str("    pop ebx\n"); // pop pointer base into EBX
                     gen_ptr_add(out, op); // calculate pointer address in EAX
                 } else {
-                    masm_generator(out, dst, var_decls, functions, lit_table);
+                    masm_generator(out, dst, var_decls, functions, lit_table, ptr_vars);
                 }
             } else {
-                masm_generator(out, dst, var_decls, functions, lit_table);
+                masm_generator(out, dst, var_decls, functions, lit_table, ptr_vars);
             }
 
             out.push_str("    mov dword ptr [eax], edx\n"); // store value in address
@@ -281,16 +282,16 @@ pub fn emit_stmt(
         IRNode::Call { name, args } => {
             // generate code for function call
             for arg in args {
-                masm_generator(out, arg, var_decls, functions, lit_table);
+                masm_generator(out, arg, var_decls, functions, lit_table, ptr_vars);
                 out.push_str("    push eax\n"); // push argument onto stack
             }
             out.push_str(&format!("    call {}\n", name));
             let num_args = args.len();
-            out.push_str(&format!("    add esp, {}\n", num_args * 4)); // clean up stack
+            out.push_str(&format!("    add esp, {}\n", num_args * 4)); // cleanup stack
         }
         IRNode::Return(opt_expr) => {
             if let Some(expr) = opt_expr {
-                masm_generator(out, expr, var_decls, functions, lit_table);
+                masm_generator(out, expr, var_decls, functions, lit_table, ptr_vars);
             } else {
                 out.push_str("    xor eax, eax\n"); // return 0 if no expression
             }
@@ -316,10 +317,10 @@ fn collect_libs(
         match e {
             Expr::Call { name, args } => {
                 if !defined.contains_key(name) {
-                    // 1️⃣  make sure EXTRN appears once per symbol
+                    // make sure EXTRN appears once per symbol
                     extrns.insert(name.clone());
 
-                    // 2️⃣  make sure the corresponding library line appears once
+                    // make sure the corresponding library line appears once
                     let lib = lib_for(name);
                     if !libs.contains(&lib.to_string()) {
                         libs.push(lib.to_string());
@@ -523,6 +524,7 @@ fn collect_vars<'a>(stmt: &'a IRNode, out: &mut Vec<(String, &'a Literal)>) {
 pub fn generate(
     nodes:      &[IRNode],
     functions:  &HashMap<String,(Vec<(String,Type)>,Type)>,
+    ptr_vars:   &HashSet<String>,
 ) -> (String, Vec<String>)
 {
     let mut libraries = Vec::new();
@@ -627,7 +629,7 @@ pub fn generate(
             let func_tail = gen_label(&mut lbl_counter);
 
             for stmt in body.iter() {
-                emit_stmt(&mut out, stmt, &var_decls, &mut lbl_counter, &func_tail, functions, &mut lit_table);
+                emit_stmt(&mut out, stmt, &var_decls, &mut lbl_counter, &func_tail, functions, &mut lit_table, &ptr_vars );
             }
 
             // remove 'jmp func_tail' if it is the last statement
@@ -663,7 +665,7 @@ fn fill_placeholders(tmpl: &str, specs: &[&str]) -> String {
 
     while let Some(ch) = chars.next() {
         if ch == '{' && chars.peek() == Some(&'}') {
-            chars.next();                       // skip the '}'
+            chars.next(); // skip the '}'
             if let Some(s) = it.next() {
                 out.push_str(s);                // normal substitution
             } else {
@@ -691,12 +693,26 @@ fn with_trailing_nl(mut s: String) -> String {
     s
 }
 
+fn is_pointer_like(expr: &Expr, ptr_vars: &HashSet<String>) -> bool
+{
+    match expr {
+        Expr::Variable(name) => ptr_vars.contains(name),
+        Expr::Unary { op: Token::Star, .. } => true,
+        _ => false,
+    }
+}
+
+fn is_integer_like(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(Literal::Int(_)) | Expr::Variable(_))
+}
+
 pub fn masm_generator(
         out: &mut String,
         expr: &Expr,
         var_decls: &Vec<(String, &Literal)>,
         functions: &HashMap<String, (Vec<(String, Type)>, Type)>,
         lit_table: &mut HashMap<String, String>,
+        ptr_vars: &HashSet<String>,
     ){
         match expr {
             Expr::Literal(Literal::Int(i)) => {
@@ -721,14 +737,19 @@ pub fn masm_generator(
                 }
             }
             Expr::Unary { op: Token::Minus, expr } => {
-                masm_generator(out, expr, var_decls, functions, lit_table);
+                masm_generator(out, expr, var_decls, functions, lit_table, ptr_vars); // generate code for the inner expression
                 out.push_str("    neg eax\n");        // arithmetic negate
             }
             Expr::Binary { left, op , right } => {
-                masm_generator(out, left, var_decls, functions, lit_table); // generate code for the left expression
-                out.push_str("    push eax\n"); // push a left result onto stack
-                masm_generator(out, right, var_decls, functions, lit_table); // generate code for right expression
-                out.push_str("    pop ebx\n"); // pop left result into ebx
+                masm_generator(out, left, var_decls, functions, lit_table, ptr_vars); // generate code for the left expression
+                out.push_str("    push eax\n"); // push a left result onto the stack
+                masm_generator(out, right, var_decls, functions, lit_table, ptr_vars); // generate code for right expression
+                out.push_str("    pop ebx\n"); // pop left a result into ebx
+
+                /* ---- optional pointer scaling ---- */
+                if matches!(op, Token::Plus | Token::Minus) && is_pointer_like(left, ptr_vars) && is_integer_like(right) {
+                    out.push_str("    imul eax, 4\n");   // sizeof(int)
+                }
 
                 match op {
                     Token::Plus => out.push_str("    add eax, ebx\n"), // add left and right results
@@ -803,9 +824,9 @@ pub fn masm_generator(
                 // *(ptr +- idx)
                 if let Expr::Binary { left, op, right } = &**expr {
                     if matches!(op, Token::Plus | Token::Minus) {
-                        masm_generator(out, left, var_decls, functions, lit_table); // evaluate pointer base
+                        masm_generator(out, left, var_decls, functions, lit_table, ptr_vars); // evaluate pointer base
                         out.push_str("    push eax\n");
-                        masm_generator(out, right, var_decls, functions, lit_table); // evaluate index
+                        masm_generator(out, right, var_decls, functions, lit_table, ptr_vars); // evaluate index
                         out.push_str("    pop ebx\n"); // pop pointer base into EBX
                         gen_ptr_add(out, op); // calculate pointer address in EAX
                         out.push_str("    mov eax, dword ptr [eax]\n"); // dereference pointer
@@ -814,30 +835,46 @@ pub fn masm_generator(
                 }
 
                 // fallback
-                masm_generator(out, expr, var_decls, functions, lit_table);
+                masm_generator(out, expr, var_decls, functions, lit_table, ptr_vars);
                 out.push_str("    mov eax, dword ptr [eax]\n"); // dereference pointer
             }
             Expr::Unary { op: Token::Ampersand, expr } => {
                 match &**expr {
                     // &variable
                     Expr::Variable(var_name) => {
-                        out.push_str(&format!("    lea eax, {}\n", var_name)); // load address of variable
+                        out.push_str(&format!("    lea eax, {}\n", var_name));
                     }
-                    // &*pointer
-                    Expr::Unary { op: Token::Star, expr: inner_expr } => {
-                        // &*expr
-                        masm_generator(out, inner_expr, var_decls, functions, lit_table);
+
+                    /* &*ptr → just “ptr”  */
+                    Expr::Unary { op: Token::Star, expr: inner } => {
+                        match &**inner {
+                            // &*(ptr ± idx) - needs scaled addition
+                            Expr::Binary { left, op, right } if matches!(op, Token::Plus | Token::Minus) => {
+                                // eax = left   (base pointer)
+                                masm_generator(out, left, var_decls, functions, lit_table, ptr_vars);
+                                out.push_str("    push eax\n");
+                                // eax = right  (index)
+                                masm_generator(out, right, var_decls, functions, lit_table, ptr_vars);
+                                out.push_str("    pop ebx\n");
+                                gen_ptr_add(out, op);                 // index *= 4; add / sub
+                            }
+
+                            // plain &*ptr - just forward the inner pointer
+                            _ => {
+                                masm_generator(out, inner, var_decls, functions, lit_table, ptr_vars);
+                            }
+                        }
                     }
-                    _ => {
-                        panic!("Unsupported unary expression for address-of: {:?}", expr);
-                    }
+
+                    /* anything else is unsupported for now      */
+                    _ => panic!("Unsupported unary & expression: {:?}", expr),
                 }
             }
             Expr::Call { name, args } => {
                 // Evaluate args right-to-left, push them on the stack
                 // We assume each argument fits in EAX after evaluating its expression.
                 for arg in args.iter().rev() {
-                    masm_generator(out, arg, var_decls, functions, lit_table);
+                    masm_generator(out, arg, var_decls, functions, lit_table, ptr_vars);
                     out.push_str("    push eax\n");
                 }
                 // Now call the function
