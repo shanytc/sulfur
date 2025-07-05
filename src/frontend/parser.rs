@@ -62,6 +62,7 @@ impl Parser {
             panic!("Expected function name after 'fn', found: {:?}", self.cur_token);
         };
 
+        // Parameter list (which is optional)
         let mut params: Vec<(String, Type)> = Vec::new();
 
         if self.cur_token == Token::LParen {
@@ -71,7 +72,12 @@ impl Parser {
             if self.cur_token != Token::RParen {
                // parse params
                 loop {
-                   // must be an identifier
+                    // check for & or * before the identifier
+                    while self.cur_token == Token::Ampersand || self.cur_token == Token::Star {
+                        self.advance(); // skip every symbol
+                    }
+
+                    // must be an identifier
                     let param_name = if let Token::Identifier(id) = &self.cur_token {
                         let n = id.clone();
                         self.advance(); // consume the identifier
@@ -423,15 +429,45 @@ impl Parser {
                     }
                 }
                 Token::Star => {
-                    self.advance();                      // consume '*'
-                    let addr_expr = self.parse_factor(); // address expression (e.g. Variable("main_a_var"))
+                    self.advance();   // leading '*'
+
+                    /* base address expression  */
+                    let mut addr_expr = self.parse_factor();    // pp   or  (*pp)
+
+                    /* skip any wrapping ')' or ']' that belong to the l-value */
+                    while matches!(self.cur_token, Token::RParen | Token::RBracket) {
+                        self.advance();                         // eat ')', ']'
+                    }
+
+                    /*  swallow one or more “[index]” postfixes that appear *after* the wrapping parens, e.g.  (*pp)[0][i]            */
+                    while self.cur_token == Token::LBracket {
+                        self.advance();                         // eat '['
+                        let idx = self.parse_logic();           // parse index
+                        assert_eq!(self.cur_token, Token::RBracket,
+                                   "Expected ']' after index");
+                        self.advance();                         // eat ']'
+
+                        /* desugar   addr_expr[idx]   →   *(addr_expr + idx) */
+                        addr_expr = Expr::Unary {
+                            op: Token::Star,
+                            expr: Box::new(Expr::Binary {
+                                left:  Box::new(addr_expr),
+                                op:    Token::Plus,
+                                right: Box::new(idx),
+                            }),
+                        };
+                    }
+
+                    /* expect ‘=’ */
                     assert_eq!(self.cur_token, Token::Assign,
                                "Expected '=' after pointer destination");
-                    self.advance();                      // consume '='
-                    let rhs = self.parse_logic();        // right-hand side
-                    if self.cur_token == Token::SemiColon {
-                        self.advance();                  // optional ';'
-                    }
+                    self.advance();                             // eat '='
+
+                    /* right-hand side */
+                    let rhs = self.parse_logic();
+                    if self.cur_token == Token::SemiColon { self.advance(); }
+
+                    /* emit IR */
                     stmts.push(IRNode::Store { dst: addr_expr, value: rhs });
                 }
                 _ => {
@@ -446,7 +482,13 @@ impl Parser {
     fn const_eval(&self, expr: &Expr) -> Literal {
         match expr {
             Expr::Literal(lit) => lit.clone(),
-
+            Expr::Unary { op: Token::Minus, expr } => {
+                match self.const_eval(expr) {
+                    Literal::Int(i)   => Literal::Int(-i),
+                    Literal::Float(f) => Literal::Float(-f),
+                    _ => panic!("Cannot apply unary minus to a non-numeric constant"),
+                }
+            }
             Expr::Binary { left, op: Token::Plus, right } => {
                 let l = self.const_eval(left);
                 let r = self.const_eval(right);
@@ -752,6 +794,12 @@ impl Parser {
                     self.advance(); // consume the identifier
                     Expr::Variable(var_name)
                 }
+            }
+            // prefix -expr (arithmetic negation)
+            Token::Minus => {
+                self.advance(); // eat '-'
+                let inner = self.parse_factor(); // recurse ⇒ higher precedence
+                Expr::Unary { op: Token::Minus, expr: Box::new(inner) }
             }
             Token::LParen => {
                 self.advance();   // consume '('

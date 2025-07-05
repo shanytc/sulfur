@@ -141,41 +141,142 @@ fn main() {
 8
 9
 ```
-
-### Dereferencing pointers
+## Pointers
+### 1. Basic “pointer out, dereference in 
 ```c
+fn main() {
+    let x, p;
+    x = 7;
+    p = &x;          // p holds the address of x
+    *p = 99;         // writes through the pointer
+    print("x = {}", x);      // → x = 99
+}
+```
+
+```bash
+x = 99
+```
+
+### Passing a raw pointer into a function
+```c
+fn inc_first(*arr) {          // parameter syntax sugar
+    arr[0] = arr[0] + 1;      // bracket → *(arr + 0)
+}
+
 fn main() {
     let a;
-    let b = 10;
-    a = &b; // a is a reference to b
-    print("Value of a: %d\n", *a);
+    a = malloc(4);            // room for one i32
+    a[0] = 10;
+    inc_first(a);             // by pointer
+    print("value = {}", a[0]);    // → value = 11
 }
 ```
 
 ```bash
-Value of a: 10
+value = 11
 ```
 
-### Pointer Indexing
+### Function that returns a pointer
+```c
+fn make_array(n) -> int {     // returns a raw int (pointer value)
+    let p;
+    p = malloc(n * 4);        // n × i32
+    return p;                 // implicit & not needed
+}
+
+fn main() {
+    let nums;
+    nums = make_array(3);     // pointer comes back in EAX
+    nums[0] = 5;
+    nums[1] = 8;
+    nums[2] = 13;
+    print("Value is: {}", nums[1]);     // → 8
+}
+```
+
+```bash
+Value is: 8
+```
+
+### Pointer-to-pointer (**)
+
+```c
+fn flip_first(**pp) {         // double dereference
+    (*pp)[0] = -(*pp)[0];
+}
+
+fn main() {
+    let arr, pp;
+    arr = malloc(4);          // one int
+    arr[0] = 42;
+    pp = &arr;                // address of the *variable* arr
+    flip_first(pp);           // changes arr[0] through **pp
+    print("Value is: {}", arr[0]);      // → -42
+}
+```
+
+```bash
+Value is: -42
+```
+
+### Manual pointer arithmetic (no [] sugar)
+```c
+fn sum_three(*base) -> int {
+    let total;
+    total = *(base + 0) + *(base + 1) + *(base + 2);
+    return total;
+}
+
+fn main() {
+    let a;
+    a = malloc(3 * 4);
+    a[0] = 3;  a[1] = 4;  a[2] = 5;
+    print("sum = {}", sum_three(a));   // → sum = 12
+}
+```
+
+```bash
+sum = 12
+```
+
+### Mixing &, *, and [] in a single expression
 ```c
 fn main() {
-    let a, b;
-    a = malloc(4 * 4);
-    a[0] = 10;
-    a[1] = 20;
-    a[2] = 30;
-    a[3] = 40;
-    let i = 0;
-    while (i < 4) {
-        print("{}", a[i]);
-        i+=1;
-    }
+    let buf, p, q;
+    buf = malloc(2 * 4);     // buf : *int
+    p   = &buf;              //  p : **int
+    (*p)[1] = 17;            // deref once, index into the array
+    q = &(*p)[1];            // q : *int  → address of that element
+    print("{}", *q);         // → 17
 }
 ```
-
 ```bash
+error
+```
+
+### Iterating over an array with a pointer variable
+```c
+fn main() {
+    let data, i, ptr;
+    data = malloc(4 * 4);
+    data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+
+    i = 0;
+    ptr = data;              // start pointer
+
+    while (i < 4) {
+        print("{}", *ptr);   // dereference
+        ptr = ptr + 1;       // advance by 1 (scaled later by backend)
+        i = i + 1;
+    }
+}
+/* output:
 10
 20
 30
 40
+*/
+```
+```bash
+error
 ```

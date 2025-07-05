@@ -720,6 +720,10 @@ pub fn masm_generator(
                     panic!("Variable '{}' not found in declarations", name);
                 }
             }
+            Expr::Unary { op: Token::Minus, expr } => {
+                masm_generator(out, expr, var_decls, functions, lit_table);
+                out.push_str("    neg eax\n");        // arithmetic negate
+            }
             Expr::Binary { left, op , right } => {
                 masm_generator(out, left, var_decls, functions, lit_table); // generate code for the left expression
                 out.push_str("    push eax\n"); // push a left result onto stack
