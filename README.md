@@ -19,6 +19,14 @@ fn main() {
 Hello, World!
 ```
 
+### Comments
+```c
+fn main() {
+    // This is a single-line comment
+    print("Comment added above!\n");
+}
+```
+
 ### Fib sequence
 ```c
 main() {
