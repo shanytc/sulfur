@@ -1,4 +1,4 @@
-# Sulf Programming Language
+# Surf Programming Language
 > [!Warning]
 > Work in Progress
 
