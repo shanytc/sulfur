@@ -765,6 +765,10 @@ impl Parser {
             Token::Star => {
                 self.advance(); // consume '*'
                 let inner = self.parse_factor();
+                // if we see *<var> or *(<var> + ...) => <var> must be a pointer
+                if let Expr::Variable(name) = &inner {
+                    self.mark_pointer(name);
+                }
                 Expr::Unary {
                     op: Token::Star,
                     expr: Box::new(inner),

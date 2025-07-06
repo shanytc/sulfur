@@ -304,7 +304,7 @@ pub fn emit_stmt(
         }
         IRNode::Call { name, args } => {
             // generate code for function call
-            for arg in args {
+            for arg in args.iter().rev() {
                 masm_generator(out, arg, var_decls, functions, lit_table, ptr_vars);
                 out.push_str("    push eax\n"); // push argument onto stack
             }
@@ -718,14 +718,18 @@ fn with_trailing_nl(mut s: String) -> String {
 
 fn is_pointer_like(expr: &Expr, ptr_vars: &HashSet<String>) -> bool {
     match expr {
-        // already-marked pointers
-        Expr::Variable(name)    => ptr_vars.contains(name),
-        // anything that dereferences or takes an address
-        Expr::Unary { op: Token::Star, .. } => true,
-        Expr::Unary { op: Token::Ampersand, expr } =>
-            matches!(**expr, Expr::Variable(_)),
-        // NEW: treat the **left** side of  “ptr = ptr2”
-        //      as pointer-like if the right side is one
+        // A variable we’ve previously marked as a pointer
+        Expr::Variable(name) => ptr_vars.contains(name),
+        // Taking an address always yields a pointer
+        Expr::Unary { op: Token::Ampersand, .. } => true,
+        // Pointer ± integer  → still a pointer
+        Expr::Binary { left, op, right }
+        if matches!(op, Token::Plus | Token::Minus)
+            && is_pointer_like(left, ptr_vars)
+            && is_integer_like(right) =>
+            true,
+
+        // Everything else (including *ptr) is NOT a pointer
         _ => false,
     }
 }
