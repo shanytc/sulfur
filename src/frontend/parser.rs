@@ -38,6 +38,15 @@ impl Parser {
         self.ptr_vars.insert(name.to_string());
     }
 
+    fn maybe_mark_pointer(&mut self, lhs: &str, rhs: &Expr) {
+        match rhs {
+            Expr::Call { name, .. } if name == "malloc" => self.mark_pointer(lhs),
+            Expr::Unary { op: Token::Ampersand, .. }    => self.mark_pointer(lhs),
+            Expr::Variable(src) if self.ptr_vars.contains(src) => self.mark_pointer(lhs),
+            _ => {}
+        }
+    }
+
     pub fn parse_program(&mut self) -> Vec<IRNode> {
         let mut nodes = Vec::new();
         while self.cur_token != Token::EOF {
@@ -690,14 +699,8 @@ impl Parser {
             if self.cur_token == Token::Assign {
                 self.advance(); // consume the '='
                 let expr = self.parse_logic(); // parse the rhs expression
-
-                /* if the RHS is malloc(...) or &expr, we know the var is a pointer */
-                if let Expr::Call { name: call_name, .. } = &expr {
-                    if call_name == "malloc" { self.mark_pointer(&name); }
-                }
-                if matches!(expr, Expr::Unary { op: Token::Ampersand, .. }) {
-                    self.mark_pointer(&name);
-                }
+                // mark the pointer if the expression is a pointer
+                self.maybe_mark_pointer(&name, &expr);
 
                 if Self::is_const_expr(&expr) {
                     // compile time constant expression

@@ -716,11 +716,16 @@ fn with_trailing_nl(mut s: String) -> String {
     s
 }
 
-fn is_pointer_like(expr: &Expr, ptr_vars: &HashSet<String>) -> bool
-{
+fn is_pointer_like(expr: &Expr, ptr_vars: &HashSet<String>) -> bool {
     match expr {
-        Expr::Variable(name) => ptr_vars.contains(name),
+        // already-marked pointers
+        Expr::Variable(name)    => ptr_vars.contains(name),
+        // anything that dereferences or takes an address
         Expr::Unary { op: Token::Star, .. } => true,
+        Expr::Unary { op: Token::Ampersand, expr } =>
+            matches!(**expr, Expr::Variable(_)),
+        // NEW: treat the **left** side of  “ptr = ptr2”
+        //      as pointer-like if the right side is one
         _ => false,
     }
 }
