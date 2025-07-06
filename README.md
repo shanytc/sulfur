@@ -278,3 +278,94 @@ fn main() {
 40
 
 ```
+
+### Pointers' Fun
+```c
+fn inc_all(arr, count) {
+    let i = 0, p = arr;
+    while (i < count) {
+        *p = *p + 1;
+        p  = p + 1;
+        i  = i + 1;
+    }
+}
+
+fn flip_first(**pp) {
+    (*pp)[0] = -(*pp)[0];
+}
+
+fn sum(arr, count) -> int {
+    let i = 0, total = 0, p = arr;
+    while (i < count) {
+        total = total + *p;
+        p = p + 1;
+        i = i + 1;
+    }
+    return total;
+}
+
+fn main() {
+    let n = 10;
+    let a = malloc(4 * n);
+
+    let i = 0;
+    while (i < n) {
+        *(a + i) = i * 2;
+        i = i + 1;
+    }
+
+    i = 0;
+    while (i < n) {
+        print("{} ", a[i]);
+        i = i + 1;
+    }
+    print("\n");
+
+    inc_all(a, n);
+
+    i = 0;
+    let p = a;
+    while (i < n) {
+        print("{} ", *p);
+        p = p + 1;
+        i = i + 1;
+    }
+    print("\n");
+
+    let pp = &a;
+    flip_first(pp);
+    print("after flip: {}\n", a[0]);
+
+    let total = sum(a, n);
+    print("sum = {}\n", total);
+
+    free(a);
+}
+```
+
+```bash
+0 
+2
+4
+6
+8
+10
+12
+14
+16
+18
+
+1
+3
+5
+7
+9
+11
+13
+15
+17
+19
+
+after flip: -1
+sum = 98
+```
