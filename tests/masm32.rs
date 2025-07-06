@@ -318,4 +318,35 @@ mod masm32 {
         let output = execute_code(asm, libs).expect("Execution failed");
         assert_eq!(output, "7", "Bitwise OR operation failed");
     }
+
+    // pointer tests
+    #[cfg(windows)]
+    #[test]
+    fn test_masm32_pointer_arithmetic() {
+        let _lock = BUILD_LOCK.lock().unwrap(); // ensure single-threaded test execution
+        let src = r#"
+            fn main() {
+                let a = malloc(4 * 10); // Allocate memory for 10 integers
+                let i = 0;
+                while (i < 10) {
+                    *(a + i) = i * 2; // Store even numbers
+                    i += 1;
+                }
+                i = 0;
+                while (i < 10) {
+                    print("%d\n", *(a + i)); // Print the values
+                    i += 1;
+                }
+                free(a); // Free the allocated memory
+            }
+        "#;
+
+        let (asm, libs) = masm32(src);
+        let output = execute_code(asm, libs).expect("Execution failed");
+        let expected = (0..10)
+            .map(|i| (i * 2).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");          // newline-separated, no trailing \n
+        assert_eq!(output, expected, "Pointer arithmetic failed");
+    }
 }

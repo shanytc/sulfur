@@ -258,26 +258,49 @@ pub fn emit_stmt(
             out.push_str(&format!("    add esp, {}\n", pushes * 4));
         }
         IRNode::Store { dst, value} => {
-            // rhs => edx
+            /* ---------- RHS → EDX ---------------------------------- */
             masm_generator(out, value, var_decls, functions, lit_table, ptr_vars);
-            out.push_str("    mov edx, eax\n"); // store value in edx
+            out.push_str("    mov edx, eax\n");          // ← put value in EDX
 
-            // address => eax
-            if let Expr::Binary { left, op, right } = dst {
-                if matches!(op, Token::Plus | Token::Minus) {
-                    masm_generator(out, left, var_decls, functions, lit_table, ptr_vars);
-                    out.push_str("    push eax\n"); // save pointer base
-                    masm_generator(out, right, var_decls, functions, lit_table, ptr_vars);
-                    out.push_str("    pop ebx\n"); // pop pointer base into EBX
-                    gen_ptr_add(out, op); // calculate pointer address in EAX
-                } else {
-                    masm_generator(out, dst, var_decls, functions, lit_table, ptr_vars);
+            // DST address -> eax
+            match dst {
+                // *(ptr ± idx) or *ptr
+                Expr::Unary { op: Token::Star, expr: inner } => {
+                    match &**inner {
+                        /*  *(ptr ± idx)  →  ptr + idx  (scale idx)          */
+                        Expr::Binary { left, op, right }
+                        if matches!(op, Token::Plus | Token::Minus) =>
+                            {
+                                masm_generator(out, left, var_decls, functions, lit_table, ptr_vars);
+                                out.push_str("    push eax\n");        // base
+                                masm_generator(out, right, var_decls, functions, lit_table, ptr_vars);
+                                out.push_str("    pop ebx\n");
+                                gen_ptr_add(out, op);                  // idx*4  add/sub
+                            }
+                        //  *ptr => just compute ptr (no dereference!)
+                        _ => {
+                            masm_generator(out, inner, var_decls, functions, lit_table, ptr_vars);
+                        }
+                    }
                 }
-            } else {
-                masm_generator(out, dst, var_decls, functions, lit_table, ptr_vars);
+
+                // ptr ± idx (no leading *)
+                Expr::Binary { left, op, right } if matches!(op, Token::Plus | Token::Minus) => {
+                    masm_generator(out, left, var_decls, functions, lit_table, ptr_vars);
+                    out.push_str("    push eax\n");
+                    masm_generator(out, right, var_decls, functions, lit_table, ptr_vars);
+                    out.push_str("    pop ebx\n");
+                    gen_ptr_add(out, op);
+                }
+
+                //  anything else – fall back to normal generator
+                _ => {
+                    masm_generator(out, dst,
+                                   var_decls, functions, lit_table, ptr_vars);
+                }
             }
 
-            out.push_str("    mov dword ptr [eax], edx\n"); // store value in address
+            out.push_str("    mov dword ptr [eax], edx\n");
         }
         IRNode::Call { name, args } => {
             // generate code for function call
